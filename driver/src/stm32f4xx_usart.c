@@ -365,18 +365,18 @@ void USART1_DMA_Init(USART_Handle_t* pUSARTHandle)
  */
 void USART2_DMA_Init(USART_Handle_t* pUSARTHandle)
 {
-	// NOTE: Only use DMA for USART1
+	// NOTE: Only use DMA for USART2
 	if (pUSARTHandle->pUSARTx == USART2)
 	{
 		/********************************DMA USART*********************************/
 		pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAT_Pos);  // Enable DMA Transmit request
-		// pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAR_Pos);  // Enable DMA Receive request
+		pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAR_Pos);  // Enable DMA Receive request
 		
 		/*******************************DMA Peripheral****************************/
-		// Enable DMA2 clock
+		// Enable DMA1 clock
 		RCC->AHB1ENR |= (1 << RCC_AHB1ENR_DMA1EN_Pos);
 		
-		//======USART2_RX========//
+		//======USART2_TX========//
 		// DMA1_Stream6_Channel_4
 		// Disable DMA channel
 		// NOTE: Only configure the DMA peripheral when DMA is disabled
@@ -395,11 +395,11 @@ void USART2_DMA_Init(USART_Handle_t* pUSARTHandle)
 		// Enable memory increment mode
 		DMA1_Stream6->CR |= (1 << DMA_SxCR_MINC_Pos);
 		
-		// Choose the channel selection (Steam 6 & Channel 4 - USART1_RX)
+		// Choose the channel selection (Stream 6 & Channel 4 - USART2_TX)
 		DMA1_Stream6->CR &= ~(0x07 << DMA_SxCR_CHSEL_Pos);
 		DMA1_Stream6->CR |= (0x04 << DMA_SxCR_CHSEL_Pos);
 		
-		//======USART2_TX========//
+		//======USART2_RX========//
 		// DMA1_Stream5_Channel_4
 		DMA1_Stream5->CR &= ~(1 << DMA_SxCR_EN_Pos);
 		while (DMA1_Stream5->CR & (1 << DMA_SxCR_EN_Pos));
@@ -416,7 +416,7 @@ void USART2_DMA_Init(USART_Handle_t* pUSARTHandle)
 		// Enable memory increment mode
 		DMA1_Stream5->CR |= (1 << DMA_SxCR_MINC_Pos);
 		
-		// Choose the channel selection (Steam 5 & Channel 4 - USART1_TX)
+		// Choose the channel selection (Stream 5 & Channel 4 - USART2_RX)
 		DMA1_Stream5->CR &= ~(0x07 << DMA_SxCR_CHSEL_Pos);
 		DMA1_Stream5->CR |= (0x04 << DMA_SxCR_CHSEL_Pos);
 	}
@@ -435,11 +435,15 @@ void USART2_DMA_Init(USART_Handle_t* pUSARTHandle)
  */
 void USART_Write(USART_Handle_t* pUSARTHandle, uint8_t *buffer, uint32_t nBytes)
 {
-	if (nBytes == 0)
+	if (nBytes == 0 || buffer == NULL || pUSARTHandle == NULL)
 	{
 		return;
 	}
 	
+	// Wait if an asynchronous (DMA/IT) transfer is currently in progress
+	uint32_t waitTimeout = 100000U;
+	while (pUSARTHandle->TxState == USART_STATE_BUSY && --waitTimeout);
+
 	uint32_t i;
 	for (i = 0; i < nBytes; i++)
 	{
@@ -585,7 +589,7 @@ void USART_Read_Until_Idle(USART_Handle_t* pUSARTHandle, uint8_t *buffer, uint32
  */
 void USART_Write_IT(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nBytes)
 {
-	if (nBytes == 0)
+	if (nBytes == 0 || buffer == NULL || pUSARTHandle == NULL)
 	{
 		return;
 	}
@@ -597,12 +601,8 @@ void USART_Write_IT(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nByt
 		pUSARTHandle->pTxBuffer = buffer;
 		pUSARTHandle->TxLen = nBytes;
 	
-		// Transmit register empty interrupt 
+		// Transmit register empty interrupt - fires immediately when TXE is set to send first byte
 		pUSARTHandle->pUSARTx->CR1 |= (1 << USART_CR1_TXEIE_Pos);
-		
-		// Write to Transmit Data Register (DR) to start transmission 
-		// An interrupt will be initiated after data in DR has been sent. 
-		pUSARTHandle->pUSARTx->DR = *buffer;
 	}
 }
 
@@ -688,7 +688,7 @@ void USART_Read_Until_Idle_IT(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uin
  */
 void USART_Write_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nBytes)
 {
-	if (nBytes == 0)
+	if (nBytes == 0 || buffer == NULL || pUSARTHandle == NULL)
 	{
 		return;
 	}
@@ -702,48 +702,98 @@ void USART_Write_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nBy
 		pUSARTHandle->TxLen = nBytes;
 		pUSARTHandle->pTxBuffer = buffer;
 		
-		// DMA2_Stream7_Channel_4
+		// DMA2_Stream7_Channel_4 for USART1_TX
 		if (pUSARTHandle->pUSARTx == USART1)
 		{
-			// Number of data to transfer 
+			// 1. Disable DMA stream before configuring NDTR (required by RM0368)
+			DMA2_Stream7->CR &= ~(1 << DMA_SxCR_EN_Pos);
+			while (DMA2_Stream7->CR & (1 << DMA_SxCR_EN_Pos));
+			
+			// 2. Clear all DMA status flags for Stream 7
+			DMA2->HIFCR = (1 << DMA_HIFCR_CTCIF7_Pos) | (1 << DMA_HIFCR_CHTIF7_Pos) |
+			              (1 << DMA_HIFCR_CTEIF7_Pos) | (1 << DMA_HIFCR_CDMEIF7_Pos) |
+			              (1 << DMA_HIFCR_CFEIF7_Pos);
+			
+			// 3. Number of data items to transfer 
 			DMA2_Stream7->NDTR = nBytes;
 			
-			// Peripheral address 
+			// 4. Peripheral address 
 			DMA2_Stream7->PAR = (uint32_t)&(pUSARTHandle->pUSARTx->DR);
 			
-			// Transmit buffer address 
+			// 5. Transmit buffer address 
 			DMA2_Stream7->M0AR = (uint32_t)pUSARTHandle->pTxBuffer;
 			
-			// Transfer direction: to peripheral
+			// 6. Transfer direction: Memory-to-peripheral (01)
 			DMA2_Stream7->CR &= ~(0x03 << DMA_SxCR_DIR_Pos);
 			DMA2_Stream7->CR |= (0x01 << DMA_SxCR_DIR_Pos);
 			
-			// Enable interrupt 
-			DMA2_Stream7->CR |= (1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos);
+			// 7. Channel 4 selection
+			DMA2_Stream7->CR &= ~(0x07 << DMA_SxCR_CHSEL_Pos);
+			DMA2_Stream7->CR |= (0x04 << DMA_SxCR_CHSEL_Pos);
 			
-			// Enable DMA2 Stream 7
+			// 8. Memory increment mode, 8-bit sizes
+			DMA2_Stream7->CR |= (1 << DMA_SxCR_MINC_Pos);
+			DMA2_Stream7->CR &= ~(1 << DMA_SxCR_PINC_Pos);
+			DMA2_Stream7->CR &= ~((0x03 << DMA_SxCR_MSIZE_Pos) | (0x03 << DMA_SxCR_PSIZE_Pos));
+			
+			// 9. Enable interrupts: Transfer Complete (TCIE) and Transfer Error (TEIE)
+			DMA2_Stream7->CR &= ~(1 << DMA_SxCR_HTIE_Pos);
+			DMA2_Stream7->CR |= (1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_TCIE_Pos);
+			
+			// 10. Enable USART DMA Transmitter
+			pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAT_Pos);
+			
+			// 11. Clear TC in USART SR
+			pUSARTHandle->pUSARTx->SR &= ~(1 << USART_SR_TC_Pos);
+			
+			// 12. Enable DMA2 Stream 7
 			DMA2_Stream7->CR |= (1 << DMA_SxCR_EN_Pos);
 		}
-		// DMA1_Stream6_Channel_4
+		// DMA1_Stream6_Channel_4 for USART2_TX
 		else if (pUSARTHandle->pUSARTx == USART2)
 		{
-			// Number of data to transfer 
+			// 1. Disable DMA stream before configuring NDTR (required by RM0368)
+			DMA1_Stream6->CR &= ~(1 << DMA_SxCR_EN_Pos);
+			while (DMA1_Stream6->CR & (1 << DMA_SxCR_EN_Pos));
+			
+			// 2. Clear all DMA status flags for Stream 6
+			DMA1->HIFCR = (1 << DMA_HIFCR_CTCIF6_Pos) | (1 << DMA_HIFCR_CHTIF6_Pos) |
+			              (1 << DMA_HIFCR_CTEIF6_Pos) | (1 << DMA_HIFCR_CDMEIF6_Pos) |
+			              (1 << DMA_HIFCR_CFEIF6_Pos);
+			
+			// 3. Number of data items to transfer 
 			DMA1_Stream6->NDTR = nBytes;
 			
-			// Peripheral address 
+			// 4. Peripheral address 
 			DMA1_Stream6->PAR = (uint32_t)&(pUSARTHandle->pUSARTx->DR);
 			
-			// Transmit buffer address 
+			// 5. Transmit buffer address 
 			DMA1_Stream6->M0AR = (uint32_t)pUSARTHandle->pTxBuffer;
 			
-			// Transfer direction: to peripheral
+			// 6. Transfer direction: Memory-to-peripheral (01)
 			DMA1_Stream6->CR &= ~(0x03 << DMA_SxCR_DIR_Pos);
 			DMA1_Stream6->CR |= (0x01 << DMA_SxCR_DIR_Pos);
 			
-			// Enable interrupt 
-			DMA1_Stream6->CR |= (1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos);
+			// 7. Channel 4 selection
+			DMA1_Stream6->CR &= ~(0x07 << DMA_SxCR_CHSEL_Pos);
+			DMA1_Stream6->CR |= (0x04 << DMA_SxCR_CHSEL_Pos);
 			
-			// Enable DMA2 Stream 7
+			// 8. Memory increment mode, 8-bit sizes
+			DMA1_Stream6->CR |= (1 << DMA_SxCR_MINC_Pos);
+			DMA1_Stream6->CR &= ~(1 << DMA_SxCR_PINC_Pos);
+			DMA1_Stream6->CR &= ~((0x03 << DMA_SxCR_MSIZE_Pos) | (0x03 << DMA_SxCR_PSIZE_Pos));
+			
+			// 9. Enable interrupts: Transfer Complete (TCIE) and Transfer Error (TEIE)
+			DMA1_Stream6->CR &= ~(1 << DMA_SxCR_HTIE_Pos);
+			DMA1_Stream6->CR |= (1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_TCIE_Pos);
+			
+			// 10. Enable USART DMA Transmitter
+			pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAT_Pos);
+			
+			// 11. Clear TC in USART SR
+			pUSARTHandle->pUSARTx->SR &= ~(1 << USART_SR_TC_Pos);
+			
+			// 12. Enable DMA1 Stream 6
 			DMA1_Stream6->CR |= (1 << DMA_SxCR_EN_Pos);
 		}
 	}
@@ -762,14 +812,14 @@ void USART_Write_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nBy
  */
 void USART_Read_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nBytes)
 {
-	if (nBytes == 0)
+	if (nBytes == 0 || buffer == NULL || pUSARTHandle == NULL)
 	{
 		return;
 	}
 	
 	uint8_t rxState = pUSARTHandle->RxState;
 	
-	// NOTE: Only use DMA for USART1
+	// NOTE: Only use DMA for USART1, USART2
 	if (rxState != USART_STATE_BUSY)
 	{	
 		pUSARTHandle->RxState = USART_STATE_BUSY;	
@@ -779,43 +829,67 @@ void USART_Read_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nByt
 		// DMA2_Stream5_Channel_4
 		if (pUSARTHandle->pUSARTx == USART1)
 		{
-			// Transfer direction: to memory
+			// 1. Disable DMA stream before configuring NDTR
+			DMA2_Stream5->CR &= ~(1 << DMA_SxCR_EN_Pos);
+			while (DMA2_Stream5->CR & (1 << DMA_SxCR_EN_Pos));
+			
+			// 2. Clear all DMA status flags for Stream 5
+			DMA2->HIFCR = (1 << DMA_HIFCR_CTCIF5_Pos) | (1 << DMA_HIFCR_CHTIF5_Pos) |
+			              (1 << DMA_HIFCR_CTEIF5_Pos) | (1 << DMA_HIFCR_CDMEIF5_Pos) |
+			              (1 << DMA_HIFCR_CFEIF5_Pos);
+			
+			// 3. Transfer direction: to memory (00)
 			DMA2_Stream5->CR &= ~(0x03 << DMA_SxCR_DIR_Pos);
 			
-			// Number of data to transfer 
+			// 4. Number of data to transfer 
 			DMA2_Stream5->NDTR = nBytes;
 			
-			// Peripheral address 
+			// 5. Peripheral address 
 			DMA2_Stream5->PAR = (uint32_t)&(pUSARTHandle->pUSARTx->DR);
 			
-			// Receive buffer address 
+			// 6. Receive buffer address 
 			DMA2_Stream5->M0AR = (uint32_t)pUSARTHandle->pRxBuffer;
 			
-			// Enable interrupt
+			// 7. Enable DMA Receiver
+			pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAR_Pos);
+			
+			// 8. Enable interrupt
 			DMA2_Stream5->CR |= (1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos);
 			
-			// Enable DMA2 Stream 5
+			// 9. Enable DMA2 Stream 5
 			DMA2_Stream5->CR |= (1 << DMA_SxCR_EN_Pos);
 		}
 		// DMA1_Stream5_Channel_4
 		else if (pUSARTHandle->pUSARTx == USART2)
 		{
-			// Transfer direction: to memory
+			// 1. Disable DMA stream before configuring NDTR
+			DMA1_Stream5->CR &= ~(1 << DMA_SxCR_EN_Pos);
+			while (DMA1_Stream5->CR & (1 << DMA_SxCR_EN_Pos));
+			
+			// 2. Clear all DMA status flags for Stream 5
+			DMA1->HIFCR = (1 << DMA_HIFCR_CTCIF5_Pos) | (1 << DMA_HIFCR_CHTIF5_Pos) |
+			              (1 << DMA_HIFCR_CTEIF5_Pos) | (1 << DMA_HIFCR_CDMEIF5_Pos) |
+			              (1 << DMA_HIFCR_CFEIF5_Pos);
+			
+			// 3. Transfer direction: to memory (00)
 			DMA1_Stream5->CR &= ~(0x03 << DMA_SxCR_DIR_Pos);
 			
-			// Number of data to transfer 
+			// 4. Number of data to transfer 
 			DMA1_Stream5->NDTR = nBytes;
 			
-			// Peripheral address 
+			// 5. Peripheral address 
 			DMA1_Stream5->PAR = (uint32_t)&(pUSARTHandle->pUSARTx->DR);
 			
-			// Receive buffer address 
+			// 6. Receive buffer address 
 			DMA1_Stream5->M0AR = (uint32_t)pUSARTHandle->pRxBuffer;
 			
-			// Enable interrupt
+			// 7. Enable DMA Receiver
+			pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAR_Pos);
+			
+			// 8. Enable interrupt
 			DMA1_Stream5->CR |= (1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos);
 			
-			// Enable DMA2 Stream 5
+			// 9. Enable DMA1 Stream 5
 			DMA1_Stream5->CR |= (1 << DMA_SxCR_EN_Pos);
 		}
 	}
@@ -875,7 +949,10 @@ void USART_Read_Until_Idle_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, ui
 			DMA2_Stream5->M0AR = (uint32_t)pUSARTHandle->pRxBuffer;
 			
 			// Clear leftover DMA interrupt flags
-			DMA2->HIFCR |= (1 << DMA_HIFCR_CTCIF5_Pos) | (1 << DMA_HIFCR_CHTIF5_Pos) | (1 << DMA_HIFCR_CTEIF5_Pos);
+			DMA2->HIFCR = (1 << DMA_HIFCR_CTCIF5_Pos) | (1 << DMA_HIFCR_CHTIF5_Pos) | (1 << DMA_HIFCR_CTEIF5_Pos);
+
+			// Enable DMA Receiver in USART CR3
+			pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAR_Pos);
 
 			// Enable DMA interrupts
 			DMA2_Stream5->CR |= (1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos);
@@ -908,7 +985,10 @@ void USART_Read_Until_Idle_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, ui
 			DMA1_Stream5->M0AR = (uint32_t)pUSARTHandle->pRxBuffer;
 			
 			// Clear leftover DMA interrupt flags
-			DMA1->HIFCR |= (1 << DMA_HIFCR_CTCIF5_Pos) | (1 << DMA_HIFCR_CHTIF5_Pos) | (1 << DMA_HIFCR_CTEIF5_Pos);
+			DMA1->HIFCR = (1 << DMA_HIFCR_CTCIF5_Pos) | (1 << DMA_HIFCR_CHTIF5_Pos) | (1 << DMA_HIFCR_CTEIF5_Pos);
+
+			// Enable DMA Receiver in USART CR3
+			pUSARTHandle->pUSARTx->CR3 |= (1 << USART_CR3_DMAR_Pos);
 
 			// Enable DMA interrupts
 			DMA1_Stream5->CR |= (1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos);
@@ -982,18 +1062,18 @@ static void __USART_Send(USART_Handle_t *pUSARTHandle)
 {
 	if (pUSARTHandle->pUSARTx->SR & (1 << USART_SR_TXE_Pos))					// Check TXE flag 	
 	{
-		(pUSARTHandle->pTxBuffer)++;			// Bytes that have been sent 
 		if (pUSARTHandle->TxLen > 0)			// Transmit the next byte
 		{
 			pUSARTHandle->pUSARTx->DR = (*pUSARTHandle->pTxBuffer) & 0xFF;	// Writing to DR clears TXE 
+			pUSARTHandle->pTxBuffer++;
+			pUSARTHandle->TxLen--;
 		}
-		else				// Transmission completes
+		
+		if (pUSARTHandle->TxLen == 0)			// Transmission completes
 		{
 			pUSARTHandle->TxState = USART_STATE_IDLE;						// Clear the flag TxState to indicate that TX is free
 			pUSARTHandle->pUSARTx->CR1 &= ~(1 << USART_CR1_TXEIE_Pos);		// Disable TXE interrupt
 		}
-		
-		pUSARTHandle->TxLen--;
 	}
 }
 
@@ -1054,13 +1134,20 @@ void USART_IRQHandling(USART_Handle_t *pUSARTHandle)
 					DMA2_Stream5->CR &= ~(1 << DMA_SxCR_EN_Pos);
 
 					// Calculate actual number of bytes received
+					uint32_t maxLen = pUSARTHandle->RxLen;
 					uint32_t remaining = DMA2_Stream5->NDTR;
-					uint32_t received = pUSARTHandle->RxLen - remaining;
+					uint32_t received = maxLen - remaining;
+
+					// Clamp received index to prevent buffer overflow on null-terminator
+					if (received >= maxLen && maxLen > 0)
+					{
+						received = maxLen - 1;
+					}
 
 					// Store actual received length back into RxLen
 					pUSARTHandle->RxLen = received;
 
-					// Null-terminate the string in buffer if within limits
+					// Null-terminate the string in buffer
 					pUSARTHandle->pRxBuffer[received] = '\0';
 
 					// Clear DMA flags
@@ -1077,13 +1164,20 @@ void USART_IRQHandling(USART_Handle_t *pUSARTHandle)
 					DMA1_Stream5->CR &= ~(1 << DMA_SxCR_EN_Pos);
 
 					// Calculate actual number of bytes received
+					uint32_t maxLen = pUSARTHandle->RxLen;
 					uint32_t remaining = DMA1_Stream5->NDTR;
-					uint32_t received = pUSARTHandle->RxLen - remaining;
+					uint32_t received = maxLen - remaining;
+
+					// Clamp received index to prevent buffer overflow on null-terminator
+					if (received >= maxLen && maxLen > 0)
+					{
+						received = maxLen - 1;
+					}
 
 					// Store actual received length back into RxLen
 					pUSARTHandle->RxLen = received;
 
-					// Null-terminate the string in buffer if within limits
+					// Null-terminate the string in buffer
 					pUSARTHandle->pRxBuffer[received] = '\0';
 
 					// Clear DMA flags
@@ -1123,32 +1217,28 @@ void USART1_DMA_IRQHandling(USART_Handle_t *pUSARTHandle)
 	if (temp1 && temp2)
 	{
 		pUSARTHandle->TxState = USART_STATE_IDLE;		// Clear the flag TxState to indicate that TX is free
-		DMA2->HIFCR |= 1 << DMA_HIFCR_CTCIF7_Pos;		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
+		DMA2->HIFCR = (1 << DMA_HIFCR_CTCIF7_Pos) | (1 << DMA_HIFCR_CHTIF7_Pos);	// Clear TC and HT flags
 		DMA2_Stream7->CR &= ~((1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos));		// Disable interrupt
 		DMA2_Stream7->CR &= ~(1 << DMA_SxCR_EN_Pos);	// Disable DMA2_Stream7
 	}
 	
-	// Let's check Transfer complete (HTIIE)
+	// Let's check Half Transfer complete (HTIE)
 	temp1 = DMA2->HISR & (1 << DMA_HISR_HTIF7_Pos);
 	temp2 = DMA2_Stream7->CR & (1 << DMA_SxCR_HTIE_Pos); 
 	if (temp1 && temp2)
 	{
-		DMA2->HIFCR |= 1 << DMA_HIFCR_CHTIF7_Pos; 		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
+		DMA2->HIFCR |= 1 << DMA_HIFCR_CHTIF7_Pos; 		// Clear HTIF flag 
 	}
 	
-	// Let's check Transfer Error (HTIIE)
+	// Let's check Transfer Error (TEIE)
 	temp1 = DMA2->HISR & (1 << DMA_HISR_TEIF7_Pos);
 	temp2 = DMA2_Stream7->CR & (1 << DMA_SxCR_TEIE_Pos); 
 	if (temp1 && temp2)
 	{
-		DMA2->HIFCR |= 1 << DMA_HIFCR_CTEIF7_Pos;		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
-		
-		// Transfer data again
-		if (pUSARTHandle->TxState == USART_STATE_BUSY)
-		{
-			pUSARTHandle->TxState = USART_STATE_IDLE;	// Clear the flag TxState to indicate that TX is free
-			USART_Write_DMA(pUSARTHandle, pUSARTHandle->pTxBuffer, pUSARTHandle->TxLen);
-		}
+		DMA2->HIFCR = (1 << DMA_HIFCR_CTEIF7_Pos) | (1 << DMA_HIFCR_CDMEIF7_Pos) | (1 << DMA_HIFCR_CFEIF7_Pos);
+		DMA2_Stream7->CR &= ~((1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos));
+		DMA2_Stream7->CR &= ~(1 << DMA_SxCR_EN_Pos);
+		pUSARTHandle->TxState = USART_STATE_IDLE;
 	}
 	
 	/**************************************USART1_RX***************************************/
@@ -1207,56 +1297,54 @@ void USART1_DMA_IRQHandling(USART_Handle_t *pUSARTHandle)
  *
  * @return 						- None
  */
-void USART2_DMA_IRQHandling(USART_Handle_t *pUSARTHandle)
+void USART2_TX_DMA_IRQHandling(USART_Handle_t *pUSARTHandle)
 {
 	uint32_t temp1, temp2;
-	/**************************************USART2_TX***************************************/
-	// DMA1_Stream6_Channel4
+	/**************************************USART2_TX (DMA1 Stream 6)***************************************/
 	// Let's check Transfer complete (TCIE)
 	temp1 = DMA1->HISR & (1 << DMA_HISR_TCIF6_Pos);
 	temp2 = DMA1_Stream6->CR & (1 << DMA_SxCR_TCIE_Pos); 
 	if (temp1 && temp2)
 	{
 		pUSARTHandle->TxState = USART_STATE_IDLE;		// Clear the flag TxState to indicate that TX is free
-		DMA1->HIFCR |= 1 << DMA_HIFCR_CTCIF6_Pos;		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
+		DMA1->HIFCR = (1 << DMA_HIFCR_CTCIF6_Pos) | (1 << DMA_HIFCR_CHTIF6_Pos);	// Clear TC and HT flags
 		DMA1_Stream6->CR &= ~((1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos));		// Disable interrupt
-		DMA1_Stream6->CR &= ~(1 << DMA_SxCR_EN_Pos);	// Disable DMA2_Stream7
+		DMA1_Stream6->CR &= ~(1 << DMA_SxCR_EN_Pos);	// Disable DMA1_Stream6
 	}
 	
-	// Let's check Transfer complete (HTIIE)
+	// Let's check Half Transfer complete (HTIE)
 	temp1 = DMA1->HISR & (1 << DMA_HISR_HTIF6_Pos);
 	temp2 = DMA1_Stream6->CR & (1 << DMA_SxCR_HTIE_Pos); 
 	if (temp1 && temp2)
 	{
-		DMA1->HIFCR |= 1 << DMA_HIFCR_CHTIF6_Pos; 		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
+		DMA1->HIFCR = 1 << DMA_HIFCR_CHTIF6_Pos; 		// Clear HTIF flag 
 	}
 	
-	// Let's check Transfer Error (HTIIE)
+	// Let's check Transfer Error (TEIE)
 	temp1 = DMA1->HISR & (1 << DMA_HISR_TEIF6_Pos);
 	temp2 = DMA1_Stream6->CR & (1 << DMA_SxCR_TEIE_Pos); 
 	if (temp1 && temp2)
 	{
-		DMA1->HIFCR |= 1 << DMA_HIFCR_CTEIF6_Pos;		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
-		
-		// Transfer data again
-		if (pUSARTHandle->TxState == USART_STATE_BUSY)
-		{
-			pUSARTHandle->TxState = USART_STATE_IDLE;	// Clear the flag TxState to indicate that TX is free
-			USART_Write_DMA(pUSARTHandle, pUSARTHandle->pTxBuffer, pUSARTHandle->TxLen);
-		}
+		DMA1->HIFCR = (1 << DMA_HIFCR_CTEIF6_Pos) | (1 << DMA_HIFCR_CDMEIF6_Pos) | (1 << DMA_HIFCR_CFEIF6_Pos);
+		DMA1_Stream6->CR &= ~((1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos));
+		DMA1_Stream6->CR &= ~(1 << DMA_SxCR_EN_Pos);
+		pUSARTHandle->TxState = USART_STATE_IDLE;
 	}
-	
-	/**************************************USART2_RX***************************************/
-	// DMA1_Stream5_Channel4
-	// Let's check Transfer complete (TEIE)
+}
+
+void USART2_RX_DMA_IRQHandling(USART_Handle_t *pUSARTHandle)
+{
+	uint32_t temp1, temp2;
+	/**************************************USART2_RX (DMA1 Stream 5)***************************************/
+	// Let's check Transfer complete (TCIE)
 	temp1 = DMA1->HISR & (1 << DMA_HISR_TCIF5_Pos);
 	temp2 = DMA1_Stream5->CR & (1 << DMA_SxCR_TCIE_Pos); 
 	if (temp1 && temp2)
 	{
 		pUSARTHandle->RxState = USART_STATE_IDLE;		// Clear the flag RxState to indicate that RX is free
-		DMA1->HIFCR |= 1 << DMA_HIFCR_CTCIF5_Pos;		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
+		DMA1->HIFCR = (1 << DMA_HIFCR_CTCIF5_Pos) | (1 << DMA_HIFCR_CHTIF5_Pos);	// Clear TC and HT flags
 		DMA1_Stream5->CR &= ~((1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos));		// Disable interrupt
-		DMA1_Stream5->CR &= ~(1 << DMA_SxCR_EN_Pos);	// Disable DMA2_Stream5
+		DMA1_Stream5->CR &= ~(1 << DMA_SxCR_EN_Pos);	// Disable DMA1_Stream5
 
 		// Disable IDLE interrupt if it was enabled
 		if (pUSARTHandle->pUSARTx->CR1 & (1 << USART_CR1_IDLEIE_Pos))
@@ -1269,27 +1357,22 @@ void USART2_DMA_IRQHandling(USART_Handle_t *pUSARTHandle)
 		}
 	}
 	
-	/****************************************DMA*********************************************/
-	// Let's check Half Transfer complete (HTIIE)
+	// Let's check Half Transfer complete (HTIE)
 	temp1 = DMA1->HISR & (1 << DMA_HISR_HTIF5_Pos);
 	temp2 = DMA1_Stream5->CR & (1 << DMA_SxCR_HTIE_Pos); 
 	if (temp1 && temp2)
 	{
-		DMA1->HIFCR |= 1 << DMA_HIFCR_CHTIF5_Pos; 		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
+		DMA1->HIFCR = 1 << DMA_HIFCR_CHTIF5_Pos; 		// Clear HTIF flag 
 	}
 	
-	// Let's check Transfer Error (TIIE)
+	// Let's check Transfer Error (TEIE)
 	temp1 = DMA1->HISR & (1 << DMA_HISR_TEIF5_Pos);
 	temp2 = DMA1_Stream5->CR & (1 << DMA_SxCR_TEIE_Pos); 
 	if (temp1 && temp2)
 	{
-		DMA1->HIFCR |= 1 << DMA_HIFCR_CTEIF5_Pos;		// writing 1 to the corresponding bit in the DMA_HIFCR register to clear the corresponding TCIF flag 
-		
-		// Transfer data again
-		if (pUSARTHandle->RxState == USART_STATE_BUSY)
-		{
-			pUSARTHandle->RxState = USART_STATE_IDLE;	// Clear the flag TxState to indicate that TX is free
-			USART_Read_DMA(pUSARTHandle, pUSARTHandle->pRxBuffer, pUSARTHandle->RxLen);
-		}
+		DMA1->HIFCR = (1 << DMA_HIFCR_CTEIF5_Pos) | (1 << DMA_HIFCR_CDMEIF5_Pos) | (1 << DMA_HIFCR_CFEIF5_Pos);
+		DMA1_Stream5->CR &= ~((1 << DMA_SxCR_TEIE_Pos) | (1 << DMA_SxCR_HTIE_Pos) | (1 << DMA_SxCR_TCIE_Pos));
+		DMA1_Stream5->CR &= ~(1 << DMA_SxCR_EN_Pos);
+		pUSARTHandle->RxState = USART_STATE_IDLE;
 	}
 }

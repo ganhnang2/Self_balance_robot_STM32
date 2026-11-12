@@ -87,6 +87,33 @@ static void HC05_Parse_Frame(HC05_Device_t* dev, uint8_t* buffer)
         // Send feedback to computer 
         HC05_Send_ACK_Frame(dev, parseSuccess);
     }
+    // Case 1.2: Receive message as LQR parameters (K1, K2, K3, K4)
+    // Formats: "LQR:K1=-7.071\r\n", "LQR:K2=-27.967\r\n", "LQR:K3=-40.384\r\n", "LQR:K4=-3.563\r\n"
+    else if (strncmp((char*)buffer, "LQR:K", 5) == 0)
+    {
+        char* p = (char*)buffer + 5;
+        char idx = p[0];
+        if (p[1] == '=')
+        {
+            float val = (float)atof(p + 2);
+            uint8_t valid = 1;
+            if (idx == '1') dev->lqr.K1 = val;
+            else if (idx == '2') dev->lqr.K2 = val;
+            else if (idx == '3') dev->lqr.K3 = val;
+            else if (idx == '4') dev->lqr.K4 = val;
+            else valid = 0;
+
+            if (valid)
+            {
+                dev->lqr.isNew = 1;
+                HC05_Send_ACK_Frame(dev, 1);
+            }
+            else
+            {
+                HC05_Send_ACK_Frame(dev, 0);
+            }
+        }
+    }
     // Case 2: Computer sends direction for robot
     // Format: "DIR:FORWARD", "DIR:REVERSED", "DIR:LEFT", "DIR:RIGHT", or "DIR:F", "DIR:1", etc.
     else if (strncmp((char*)buffer, "DIR:", 4) == 0)
@@ -116,6 +143,24 @@ static void HC05_Parse_Frame(HC05_Device_t* dev, uint8_t* buffer)
         {
             dev->direction.current = DIR_NONE;
             dev->direction.isNew = 1;
+        }
+    }
+    // Case 3: Computer sends a new balance setpoint angle
+    // Format: "SET:1.056\r\n"  (setpoint in degrees, range [-10.0, +10.0])
+    else if (strncmp((char*)buffer, "SET:", 4) == 0)
+    {
+        float val = (float)atof((char*)buffer + 4);
+
+        // Validate range to guard against corrupted frames
+        if (val >= -10.0f && val <= 10.0f)
+        {
+            dev->setpoint.value = val;
+            dev->setpoint.isNew = 1;
+            HC05_Send_ACK_Frame(dev, 1);
+        }
+        else
+        {
+            HC05_Send_ACK_Frame(dev, 0);
         }
     }
 }
@@ -185,8 +230,15 @@ void HC05_Init(HC05_Device_t* dev, USART_Handle_t* usartConfig)
     dev->direction.isNew = 0;
     dev->pid.isNew = 0;
     dev->pid.target = PID_TARGET_NONE;
+    dev->lqr.K1 = 0.0f;
+    dev->lqr.K2 = 0.0f;
+    dev->lqr.K3 = 0.0f;
+    dev->lqr.K4 = 0.0f;
+    dev->lqr.isNew = 0;
+    dev->setpoint.value = 0.0f;
+    dev->setpoint.isNew = 0;
     memset(dev->rxBuffer, 0, sizeof(dev->rxBuffer));
-    USART_Read_Until_Idle_IT(&dev->usart, (uint8_t*)dev->rxBuffer, HC05_RX_BUFFER_SIZE);
+    USART_Read_Until_Idle_DMA(&dev->usart, (uint8_t*)dev->rxBuffer, HC05_RX_BUFFER_SIZE);
 }
 
 uint8_t HC05_Send_ACK_Frame(HC05_Device_t* dev, uint8_t isOk)
@@ -196,9 +248,13 @@ uint8_t HC05_Send_ACK_Frame(HC05_Device_t* dev, uint8_t isOk)
         return 0;
     }
 
+    // Guard: wait with timeout if a background DMA telemetry transmission is active
+    uint32_t timeout = 50000U;
+    while (USART_Get_State(&dev->usart, USART_TX_MODE) == USART_STATE_BUSY && --timeout);
+
     const char *msg = isOk ? "ACK:OK\r\n" : "ACK:FAIL\r\n";
     uint32_t len    = isOk ? 8U : 10U;
-    USART_Write(&dev->usart, (uint8_t*)msg, len);
+    USART_Write_DMA(&dev->usart, (uint8_t*)msg, len);
     return (uint8_t)len;
 }
 
@@ -209,12 +265,19 @@ uint8_t HC05_Send_IMU_Frame(HC05_Device_t* dev, float targetAngle, float pitch, 
         return 0;
     }
 
+    // Non-blocking DMA: If previous DMA transmission is still ongoing, skip this frame
+    // to prevent buffer corruption and eliminate CPU blocking
+    if (USART_Get_State(&dev->usart, USART_TX_MODE) == USART_STATE_BUSY)
+    {
+        return 0;
+    }
+
     uint8_t state = 0;
     int len = snprintf(dev->txBuffer, (size_t)HC05_TX_BUFFER_SIZE, "IMU:%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\r\n", targetAngle, pitch, ax, ay, az, gx, gy, gz);
     
     if (len > 0 && (uint32_t)len < HC05_TX_BUFFER_SIZE)
     {
-        USART_Write(&dev->usart, (uint8_t*)dev->txBuffer, (uint32_t)len);
+        USART_Write_DMA(&dev->usart, (uint8_t*)dev->txBuffer, (uint32_t)len);
         state = (uint8_t)len;
     }
     
@@ -236,6 +299,7 @@ uint8_t HC05_Receive_Frame(HC05_Device_t* dev, uint8_t* buffer)
         dev->pid.isNew = 0;
         dev->pid.target = PID_TARGET_NONE;
         dev->direction.isNew = 0;
+        dev->setpoint.isNew = 0;
 
         HC05_Parse_Frame(dev, (uint8_t*)target);
         return true;
@@ -296,6 +360,30 @@ uint8_t HC05_Is_Parameter_New(HC05_Device_t* dev)
     return dev->pid.isNew;
 }
 
+void HC05_Get_LQR_Parameters(HC05_Device_t* dev, float* K1, float* K2, float* K3, float* K4)
+{
+    if (dev == NULL)
+    {
+        return;
+    }
+
+    if (K1 != NULL) *K1 = dev->lqr.K1;
+    if (K2 != NULL) *K2 = dev->lqr.K2;
+    if (K3 != NULL) *K3 = dev->lqr.K3;
+    if (K4 != NULL) *K4 = dev->lqr.K4;
+
+    dev->lqr.isNew = 0;
+}
+
+uint8_t HC05_Is_LQR_Parameter_New(HC05_Device_t* dev)
+{
+    if (dev == NULL)
+    {
+        return 0;
+    }
+    return dev->lqr.isNew;
+}
+
 uint8_t HC05_Is_Direction_New(HC05_Device_t* dev)
 {
     if (dev == NULL)
@@ -303,6 +391,25 @@ uint8_t HC05_Is_Direction_New(HC05_Device_t* dev)
         return 0;
     }
     return dev->direction.isNew;
+}
+
+uint8_t HC05_Is_Setpoint_New(HC05_Device_t* dev)
+{
+    if (dev == NULL)
+    {
+        return 0;
+    }
+    return dev->setpoint.isNew;
+}
+
+float HC05_Get_Setpoint(HC05_Device_t* dev)
+{
+    if (dev == NULL)
+    {
+        return 0.0f;
+    }
+    dev->setpoint.isNew = 0;
+    return dev->setpoint.value;
 }
 
 // This handler must be invoked inside the corresponding USART IRQHandler by the application
@@ -330,17 +437,43 @@ void HC05_IRQ_Handler(HC05_Device_t* dev)
         
         // 2. Clear buffer and re-arm reception for the next incoming frame
         memset(dev->rxBuffer, 0, sizeof(dev->rxBuffer));
-        USART_Read_Until_Idle_IT(&dev->usart, (uint8_t*)dev->rxBuffer, HC05_RX_BUFFER_SIZE);
+        USART_Read_Until_Idle_DMA(&dev->usart, (uint8_t*)dev->rxBuffer, HC05_RX_BUFFER_SIZE);
     }
 }
 
-// This handler must be invoked inside the corresponding DMA_Stream Handler by the application
-void HC05_DMA_IRQHandler(HC05_Device_t* dev)
+// This handler must be invoked inside DMA1_Stream6_IRQHandler (TX DMA)
+void HC05_TX_DMA_IRQHandler(HC05_Device_t* dev)
 {
-	if (dev == NULL)
-	{
-		return;
-	}
-	
-	USART2_DMA_IRQHandling(&dev->usart);
+    if (dev == NULL)
+    {
+        return;
+    }
+
+    USART2_TX_DMA_IRQHandling(&dev->usart);
+}
+
+// This handler must be invoked inside DMA1_Stream5_IRQHandler (RX DMA)
+void HC05_RX_DMA_IRQHandler(HC05_Device_t* dev)
+{
+    if (dev == NULL)
+    {
+        return;
+    }
+
+    uint8_t prevState = (USART_Get_State(&dev->usart, USART_RX_MODE) == USART_STATE_BUSY);
+
+    USART2_RX_DMA_IRQHandling(&dev->usart);
+
+    uint8_t currState = (USART_Get_State(&dev->usart, USART_RX_MODE) == USART_STATE_IDLE);
+
+    // If DMA buffer was filled completely (TC triggered before IDLE)
+    if (prevState && currState)
+    {
+        if (dev->rxBuffer[0] != '\0')
+        {
+            Queue_Push_Cmd(&dev->queue, dev->rxBuffer);
+        }
+        memset(dev->rxBuffer, 0, sizeof(dev->rxBuffer));
+        USART_Read_Until_Idle_DMA(&dev->usart, (uint8_t*)dev->rxBuffer, HC05_RX_BUFFER_SIZE);
+    }
 }

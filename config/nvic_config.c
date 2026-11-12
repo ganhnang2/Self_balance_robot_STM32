@@ -23,13 +23,16 @@ void NVIC_Config_ControlLoop(IRQn_Type timerIrq)
 
 void NVIC_Config_HC05(void)
 {	
-    /* Level 1: Medium priority for Bluetooth command parsing */
-    NVIC_SetPriority(DMA1_Stream6_IRQn, NVIC_PRIO_HC05_BLUETOOTH_RX);
-    NVIC_EnableIRQ(DMA1_Stream6_IRQn);
-	
-	/* Level 2: Medium priority for Bluetooth IMU Frame sending */
-	NVIC_SetPriority(USART2_IRQn, NVIC_PRIO_HC05_BLUETOOTH_TX);
+    /* Level 1: Medium priority for Bluetooth command reception (USART2 IDLE & DMA1 Stream 5 RX) */
+    NVIC_SetPriority(USART2_IRQn, NVIC_PRIO_HC05_BLUETOOTH_RX);
     NVIC_EnableIRQ(USART2_IRQn);
+
+    // NVIC_SetPriority(DMA1_Stream5_IRQn, NVIC_PRIO_HC05_BLUETOOTH_RX);
+    // NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+	
+    /* Level 2: Medium priority for Bluetooth IMU Frame sending (DMA1 Stream 6 TX) */
+    NVIC_SetPriority(DMA1_Stream6_IRQn, NVIC_PRIO_HC05_BLUETOOTH_TX);
+    NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 }
 
 void NVIC_Config_OLED_DMA(void)

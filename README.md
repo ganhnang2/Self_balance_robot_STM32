@@ -276,3 +276,109 @@ make -f Makefile.mak flash
      USART_Write_Float_Bin(&hUsart1, pitch_angle);    // Outputs 4 raw bytes (Little-Endian)
      ```
      *(Minimal CPU overhead; ideal for MATLAB, Python, or Vofa+ serial visualizers)*.
+
+---
+
+## 9. LQR Controller Architecture & Real-Time Implementation Guide
+
+### 9.1. Tổng quan & Mô hình toán học (State-Space Representation)
+Khác với PID (điều khiển đa vòng lặp đơn biến SISO độc lập dễ gây xung đột giữa góc nghiêng và vị trí), **LQR (Linear Quadratic Regulator)** là bộ điều khiển tối ưu đa biến phản hồi trạng thái (Full State-Feedback Controller). LQR giải quyết đồng thời bài toán giữ thăng bằng và ổn định vị trí thông qua việc cực tiểu hóa hàm mục tiêu chi phí toàn phương:
+
+$$J = \int_{0}^{\infty} \left( x(t)^T Q x(t) + u(t)^T R u(t) \right) dt$$
+
+Trong đó:
+- $Q = \text{diag}([q_1, q_2, q_3, q_4])$: Ma trận bán xác định dương phạt sai số các biến trạng thái ($p, \dot{p}, \theta, \dot{\theta}$).
+- $R$: Trọng số phạt điện áp điều khiển cấp vào phần ứng động cơ $V_a$.
+
+#### Vector Trạng thái (State Vector) $x(t) \in \mathbb{R}^4$:
+$$x = \begin{bmatrix} x_1 \\ x_2 \\ x_3 \\ x_4 \end{bmatrix} = \begin{bmatrix} p \\ \dot{p} \\ \theta \\ \dot{\theta} \end{bmatrix} = \begin{bmatrix} \text{Vị trí tuyến tính dọc của khung xe (m)} \\ \text{Vận tốc tuyến tính của khung xe (m/s)} \\ \text{Góc nghiêng thân xe so với phương thẳng đứng (rad)} \\ \text{Vận tốc góc nghiêng của thân xe (rad/s)} \end{bmatrix}$$
+
+#### Luật Điều khiển Phản hồi Trạng thái (Control Law):
+Đầu ra tính toán của bộ điều khiển là điện áp phần ứng động cơ $V_a$ (Volt):
+$$u = -K (x - x_{ref}) = -\left[ K_1 (p - p_{ref}) + K_2 (\dot{p} - \dot{p}_{ref}) + K_3 (\theta - \theta_{ref}) + K_4 (\dot{\theta} - \dot{\theta}_{ref}) \right]$$
+
+*Ý nghĩa vật lý của 4 hệ số hồi tiếp:*
+- $K_1$: Hồi tiếp vị trí (Position Gain) — sinh lực kéo xe về vị trí đặt $p_{ref}$.
+- $K_2$: Hồi tiếp vận tốc (Velocity Gain) — giảm chấn quán tính chuyển động, triệt tiêu trôi xe.
+- $K_3$: Hồi tiếp góc nghiêng (Angle Gain) — tạo mô-men phản kháng để chống ngã và giữ thăng bằng.
+- $K_4$: Hồi tiếp vận tốc góc (Angular Rate Gain) — dập tắt dao động lắc lư quanh điểm cân bằng.
+
+---
+
+### 9.2. Quy chuẩn hóa Đơn vị SI (Crucial SI Unit Conversion)
+Ma trận hệ số hồi tiếp $K = [K_1, K_2, K_3, K_4]$ được tính toán trong MATLAB (`Matlab_scripts/lqr_controller.m`) dựa trên các phương trình động lực học chuẩn SI ($m, m/s, rad, rad/s, V$). Trên vi điều khiển STM32, các cảm biến đọc ra đơn vị góc độ ($^\circ$), tốc độ độ/giây ($^\circ/s$) và khoảng cách encoder ($mm, mm/s$).
+
+**BẮT BUỘC** phải chuẩn hóa biến đo về SI trước khi đưa vào luật điều khiển LQR:
+1. **Góc nghiêng $\theta$**:
+   $$\theta = (\text{Pitch}_{\text{kalman}} - \theta_{\text{offset}}) \times \frac{\pi}{180.0\text{f}} \quad [\text{rad}]$$
+2. **Vận tốc góc $\dot{\theta}$**:
+   $$\dot{\theta} = \text{Gyro\_Y}_{\text{calibrated}} \times \frac{\pi}{180.0\text{f}} \quad [\text{rad/s}]$$
+3. **Vị trí $p$**:
+   $$p = \text{Motor\_Get\_Chassis\_Position}() \times 0.001\text{f} \quad [\text{m}]$$
+4. **Vận tốc tuyến tính $\dot{p}$**:
+   $$\dot{p} = \text{Motor\_Get\_Chassis\_Linear\_Velocity}(dt) \times 0.001\text{f} \quad [\text{m/s}]$$
+
+---
+
+### 9.3. Kiến trúc Thực thi & Thời gian thực (Real-Time Architecture)
+
+```text
++------------------------------------------------------------------------------------+
+|             HARD REAL-TIME INTERRUPT (TIM2 IRQ Handler: 200 Hz / 5 ms)             |
+|                      [Mức ưu tiên ngắt cao nhất: NVIC Level 0]                     |
++------------------------------------------------------------------------------------+
+  | 1. Đọc IMU (MPU-6050 I2C1) -> Bộ lọc Kalman -> pitch (deg), gyro_y (deg/s)
+  | 2. Đọc Encoder (TIM1, TIM4) -> Motor_Encoder_Update() -> pos (mm), vel (mm/s)
+  | 3. Chuẩn hóa 4 trạng thái về đơn vị SI: p (m), v (m/s), theta (rad), omega (rad/s)
+  | 4. Kiểm tra điều kiện An toàn (Failsafe Guard):
+  |      Nếu |theta| > 35°: Xe bị đổ / nhấc bổng -> TẮT CẦU H (TB6612_Coast), Reset x_ref
+  | 5. Tính toán LQR:
+  |      V_bal = - (K1*(p - p_ref) + K2*(v - v_ref) + K3*theta + K4*omega)
+  | 6. Phối hợp bẻ lái (Yaw Turning Mixer):
+  |      V_Left = V_bal + V_turn
+  |      V_Right = V_bal - V_turn
+  | 7. Kẹp bão hòa [-V_bat, +V_bat] và Bù vùng chết động cơ (Deadband Compensation)
+  | 8. Xuất xung PWM sang TIM3 (CH1: Phải, CH2: Trái)
++------------------------------------------------------------------------------------+
+
++------------------------------------------------------------------------------------+
+|                    BACKGROUND SUPERLOOP (main.c - while(1))                        |
+|                           [Mức ưu tiên: NVIC Level 1 - 3]                          |
++------------------------------------------------------------------------------------+
+  | 1. Xử lý nhận gói tin Bluetooth HC-05 (Cập nhật online K1..K4, SET:theta_offset)
+  | 2. Nhận lệnh điều hướng (DIR:FORWARD, DIR:LEFT, v.v.) -> cập nhật v_ref, V_turn
+  | 3. Gửi Telemetry IMU lên PC: "IMU:target,pitch,ax,ay,az,gx,gy,gz\r\n"
+  | 4. Cập nhật Framebuffer và hiển thị OLED SSD1306 (I2C2 qua DMA)
+  | 5. Đảo trạng thái Built-in LED PC13 (Heartbeat)
++------------------------------------------------------------------------------------+
+```
+
+---
+
+### 9.4. Bù Vùng chết Động cơ (Deadband Compensation)
+Động cơ DC kèm hộp số bánh răng JGA25-370 luôn có ma sát tĩnh (stiction). Khi điện áp cấp ra quá nhỏ ($|V_a| < 0.8\text{V} - 1.2\text{V}$), động cơ không thể quay, làm mất khả năng cân bằng tinh vi quanh điểm 0.
+
+Phương pháp bù:
+$$\text{PWM}_{\text{out}} = \begin{cases} 
+\text{PWM}_{\text{calc}} + \text{PWM}_{\text{deadband}} & \text{nếu } \text{PWM}_{\text{calc}} > 0 \\ 
+\text{PWM}_{\text{calc}} - \text{PWM}_{\text{deadband}} & \text{nếu } \text{PWM}_{\text{calc}} < 0 \\ 
+0 & \text{nếu } \text{PWM}_{\text{calc}} = 0 
+\end{cases}$$
+*(Giá trị $\text{PWM}_{\text{deadband}}$ thường tương đương duty cycle khoảng 5% - 8% của TIM3 ARR)*.
+
+---
+
+### 9.5. Giao thức Truyền thông Tune LQR Trực tuyến (Bluetooth Protocol)
+Để tối ưu hóa quá trình thực nghiệm mà không phải nạp lại code liên tục:
+
+1. **Gói tin Tune tham số LQR (PC $\rightarrow$ STM32)**:
+   - `LQR:K1=-7.071\r\n` (Gain Vị trí $p$)
+   - `LQR:K2=-27.967\r\n` (Gain Vận tốc $\dot{p}$)
+   - `LQR:K3=-40.384\r\n` (Gain Góc nghiêng $\theta$)
+   - `LQR:K4=-3.563\r\n` (Gain Vận tốc góc $\dot{\theta}$)
+2. **Gói tin Chỉnh điểm Cân bằng tĩnh $\theta_{\text{offset}}$ (PC $\rightarrow$ STM32)**:
+   - `SET:1.056\r\n` (Độ lệch góc cân bằng tĩnh thực tế do trọng tâm cơ học)
+3. **Gói tin Phản hồi (STM32 $\rightarrow$ PC)**:
+   - `ACK:OK\r\n` hoặc `ACK:FAIL\r\n`
+4. **Gói tin Telemetry IMU (STM32 $\rightarrow$ PC)**:
+   - `IMU:targetAngle,pitch,ax,ay,az,gx,gy,gz\r\n` (Vẽ đồ thị phản ứng trên `hc05_fast_plotter.py`)

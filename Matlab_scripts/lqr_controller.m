@@ -6,13 +6,13 @@
 clear; clc; close all;
 
 %% 1. KHAI BÁO THÔNG SỐ VẬT LÝ CỦA XE & ĐỘNG CƠ (Đơn vị SI: kg, m, s)
-M = 0.8;          % Khối lượng phần thân xe (kg) - Gồm: Khung xe + Hai động cơ (Ko tính 2 bánh)
-m = 0.04;         % Khối lượng 1 bánh xe (kg)
-r = 0.0325;       % Bán kính bánh xe (m) (đường kính 65mm -> r = 0.0325m)
-L = 0.15;         % Tổng chiều cao thân xe (m)
-a = 0.10;         % Bề dày thân xe theo phương tiến/lùi (m)
-l = 0.07;         % Khoảng cách từ trục bánh xe O đến trọng tâm P (m)
-g = 9.80665;      % Gia tốc trọng trường (m/s^2)
+M = 0.670;          % Khối lượng phần thân xe (kg) - Gồm: Khung xe + Hai động cơ (Ko tính 2 bánh) (Nếu thêm 1 tầng nữa thì 710g)
+m = 0.05;           % Khối lượng 1 bánh xe (kg)
+r = 0.0325;         % Bán kính bánh xe (m) (đường kính 65mm -> r = 0.0325m)
+L = 0.145;          % Tổng chiều cao thân xe (m)     (2 tầng + 3 khung = 14.5cm, 3 tầng + 4 khung = 18.68cm)  
+a = 0.10;           % Bề dày thân xe theo phương tiến/lùi (m)
+l = L / 2;          % Khoảng cách từ trục bánh xe O đến trọng tâm P (m)
+g = 9.80665;        % Gia tốc trọng trường (m/s^2)
 
 % Thông số động cơ JGA25-370-21.3K (Quy đổi tại trục bánh xe)
 Mc = 0.0392266;     % Mô-men tải định mức

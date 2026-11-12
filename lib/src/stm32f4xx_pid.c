@@ -63,7 +63,7 @@ float PID_Compute(PID_t* pid, float setpoint, float measured_value, float dt)
 	}
     
     // Derivative (D)
-    float derivative = (error - pid->prevError) / dt;
+    float derivative = (error - pid->prevError);
     pid->prevError = error;
     
     // Output
@@ -79,7 +79,7 @@ float PID_Compute(PID_t* pid, float setpoint, float measured_value, float dt)
 		output = -pid->maxOutput;
 	}
     
-    return output;
+    return -1.0f * output;
 }
 
 /* --------------------------------------------------------------------------
@@ -104,9 +104,9 @@ float PID_Compute_Advanced(PID_t* pid, float setpoint, float measurement, float 
 
     /* --- I term với clamp --- */
     pid->integral += error * dt;
-    float iTerm    = pid->ki * pid->integral;
-	
-	// Anti-windup
+
+    /* Anti-windup: clamp TRƯỚC khi nhân Ki để iTerm không vượt ngưỡng
+     * trong chính chu kỳ tích lũy vừa xảy ra. */
 	if (pid->integral > pid->maxIntegral) 
 	{
 		pid->integral = pid->maxIntegral;
@@ -115,6 +115,8 @@ float PID_Compute_Advanced(PID_t* pid, float setpoint, float measurement, float 
 	{
 		pid->integral = -pid->maxIntegral;
 	}
+
+    float iTerm = pid->ki * pid->integral;
 
     /* --- Output --- */
     float output = pTerm + iTerm + dTerm;	

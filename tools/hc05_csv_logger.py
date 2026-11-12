@@ -407,7 +407,7 @@ def main():
     if args.output:
         csv_filename = args.output
     else:
-        csv_filename = f"imu_log_angle_param4.csv"
+        csv_filename = f"imu_log_angle_param1.csv"
 
     # Đảm bảo thư mục tồn tại
     csv_dir = os.path.dirname(os.path.abspath(csv_filename))

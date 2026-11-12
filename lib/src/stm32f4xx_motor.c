@@ -9,6 +9,9 @@
 static Encoder_t g_EncLeft;
 static Encoder_t g_EncRight;
 
+/* Accumulated chassis position in mm — updated every Motor_Encoder_Update() */
+static float g_ChassisPositionMM = 0.0f;
+
 /* =========================================================================
  * TB6612_Init
  * Configures: Direction pins (PB12-PB15), PWM pins (PB4/PB5 AF2→TIM3)
@@ -168,6 +171,7 @@ void Motor_Encoder_Init(void)
  * Motor_Encoder_Update
  * Read TIM1 (Left) and TIM4 (Right) CNT registers and compute signed delta
  * using wrap-around subtraction — handles overflow/underflow with no if-else.
+ * Also accumulates positionMM for Motor_Get_Position().
  * ========================================================================= */
 void Motor_Encoder_Update(void)
 {
@@ -179,6 +183,7 @@ void Motor_Encoder_Update(void)
     g_EncLeft.prevCnt     = leftCnt;
     g_EncLeft.currCnt     = leftCnt;
     g_EncLeft.deltaCounts = (int32_t)leftDelta;
+    g_EncLeft.positionMM += (float)leftDelta * ENCODER_MM_PER_COUNT;
 	
     /* --- Right wheel: TIM4 (16-bit) --- */
     uint16_t rightCnt = (uint16_t)TIM4->CNT;
@@ -186,6 +191,12 @@ void Motor_Encoder_Update(void)
     g_EncRight.prevCnt     = rightCnt;
     g_EncRight.currCnt     = rightCnt;
     g_EncRight.deltaCounts = (int32_t)rightDelta;
+    g_EncRight.positionMM += (float)rightDelta * ENCODER_MM_PER_COUNT;
+
+    /* --- Chassis position: average displacement of both wheels ---
+     * x += ((ΔpulseL + ΔpulseR) / 2) × mm_per_count
+     * Equivalent to: x = (posL + posR) / 2 when accumulated from zero. */
+    g_ChassisPositionMM += ((float)(leftDelta + rightDelta) * 0.5f) * ENCODER_MM_PER_COUNT;
 }
 
 /* =========================================================================
@@ -203,6 +214,13 @@ void Motor_Encoder_Reset(void)
 
     g_EncLeft.deltaCounts  = 0;
     g_EncRight.deltaCounts = 0;
+
+    /* Reset derived state for position and velocity */
+    g_EncLeft.positionMM   = 0.0f;
+    g_EncRight.positionMM  = 0.0f;
+    g_EncLeft.velocityEMA  = 0.0f;
+    g_EncRight.velocityEMA = 0.0f;
+    g_ChassisPositionMM    = 0.0f;
 }
 
 /* =========================================================================
@@ -227,4 +245,78 @@ uint32_t Motor_Get_Encoder_Counter_Left(void)
 uint32_t Motor_Get_Encoder_Counter_Right(void)
 {
 	return (uint32_t)g_EncRight.currCnt;
+}
+
+/**
+ * @brief 			- Return the accumulated linear position (mm) of the selected wheel.
+ * @note 			- Accumulation is done inside Motor_Encoder_Update(), so this getter is
+ * 					side-effect-free and safe to call multiple times per sample period.
+ *
+ * @param  side   	- 0 → Left wheel (g_EncLeft), non-zero → Right wheel (g_EncRight)
+ * @return float  	- Accumulated linear position in mm
+ *                	(positive = forward, negative = backward)
+ */
+float Motor_Get_Position(uint8_t side)
+{
+    Encoder_t *enc = (side == 0) ? &g_EncLeft : &g_EncRight;
+    return enc->positionMM;
+}
+
+/**
+ * @brief               - Compute an EMA-filtered wheel velocity in mm/s.
+ * @param  side         - 0 → Left wheel, non-zero → Right wheel
+ * @param  deltaT       - Sample period in seconds (must be > 0)
+ * @return float        - EMA-filtered velocity in mm/s
+ * @note                - Without smoothing, the raw velocity quantises to multiples of
+ *                      (ENCODER_MM_PER_COUNT / deltaT).
+ *                      - At short deltaT (e.g. 5 ms) even a 1-count resolution gives ~±10 mm/s
+ *                      jumps, which corrupt any derivative term in a PID.  The EMA filter
+ *                      blends successive raw samples:
+ *                          +) raw  = (deltaCounts * ENCODER_MM_PER_COUNT) / deltaT
+ *                          +) EMA  = α * raw  +  (1 − α) * EMA_prev          (α = MOTOR_EMA_ALPHA)
+ */
+float Motor_Get_Velocity(uint8_t side, float deltaT)
+{
+    Encoder_t *enc = (side == 0) ? &g_EncLeft : &g_EncRight;
+
+    /* Guard against zero / negative time to prevent division by zero */
+    if (deltaT <= 0.0f)
+    {
+        return enc->velocityEMA;
+    }
+
+    float rawVelocity = ((float)enc->deltaCounts * ENCODER_MM_PER_COUNT) / deltaT;
+
+    /* EMA: blend raw measurement with previous filtered value */
+    enc->velocityEMA = MOTOR_EMA_ALPHA * rawVelocity
+                     + (1.0f - MOTOR_EMA_ALPHA) * enc->velocityEMA;
+
+    return enc->velocityEMA;
+}
+
+/**
+ * @brief           - Compute the EMA-filtered linear velocity of the robot chassis (mm/s).
+ *
+ * @param  deltaT   - Sample period in seconds (must be > 0).
+ *                  Passed through to Motor_Get_Velocity() for both wheels.
+ * @return float    - EMA-filtered chassis linear velocity in mm/s.
+ *                  Positive = forward, Negative = backward.
+ * @note            -  For a two-wheeled differential drive robot, the chassis translational
+ *                     velocity is the average of both wheel rim velocities:
+ *                              +) v_chassis = (v_left + v_right) / 2
+ *                  - This function internally calls Motor_Get_Velocity() for both sides, so
+ *                  the EMA state of each wheel is updated as a side-effect.
+ *                  - Call AFTER Motor_Encoder_Update() every sample period.
+ */
+float Motor_Get_Chassis_Linear_Velocity(float deltaT)
+{
+    float vLeft  = Motor_Get_Velocity(MOTOR_LEFT_SIDE,  deltaT);
+    float vRight = Motor_Get_Velocity(MOTOR_RIGHT_SIDE, deltaT);
+
+    return (vLeft + vRight) * 0.5f;
+}
+
+float Motor_Get_Chassis_Position()
+{
+	return g_ChassisPositionMM;
 }

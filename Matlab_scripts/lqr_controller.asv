@@ -1,0 +1,175 @@
+%% ========================================================================
+%  THIẾT KẾ LQR 4 TRẠNG THÁI - ĐẦU VÀO ĐIỆN ÁP Va (1 PHẦN TỬ)
+%  Đánh giá: Tính ổn định, Cực - Không (Pole-Zero), Biểu đồ Bode & Đáp ứng
+%  Động cơ: JGA25-370-21.3K (12V - 280 RPM)
+% =========================================================================
+clear; clc; close all;
+
+%% 1. KHAI BÁO THÔNG SỐ VẬT LÝ CỦA XE & ĐỘNG CƠ (Đơn vị SI: kg, m, s)
+M = 0.8;          % Khối lượng phần thân xe (kg) - Gồm: Khung xe + Hai động cơ (Ko tính 2 bánh)
+m = 0.05;         % Khối lượng 1 bánh xe (kg)
+r = 0.0325;       % Bán kính bánh xe (m) (đường kính 65mm -> r = 0.0325m)
+L = 0.15;         % Tổng chiều cao thân xe (m)
+a = 0.10;         % Bề dày thân xe theo phương tiến/lùi (m)
+l = L;         % Khoảng cách từ trục bánh xe O đến trọng tâm P (m)
+g = 9.80665;      % Gia tốc trọng trường (m/s^2)
+
+% Thông số động cơ JGA25-370-21.3K (Quy đổi tại trục bánh xe)
+Mc = 0.0392266;     % Mô-men tải định mức
+La = 0.0005;        % Cuộn cảm của động cơ
+Ra = 7.73798;       % Điện trở của động cơ
+Jeq= 0.0005;        
+Km_phi = 0.1089611; % Hằng số mô-men xoắn của động cơ
+Ke_phi = 0.4092556; % Hằng số sức điện động
+V_supply = 12.0;    % Điện áp nguồn cấp tối đa (V)
+
+%% 2. TÍNH MÔ-MEN QUÁN TÍNH & HỆ SỐ ĐỘNG LỰC HỌC GỐC (Phương trình 19)
+I   = 0.5 * m * r^2;                 % Mô-men quán tính 1 bánh xe (kg.m^2)
+J_P = (1/12) * M * (L^2 + a^2);      % Mô-men quán tính thân xe quanh trọng tâm P (kg.m^2)
+
+% Mẫu số chung tương đương Q_eq
+Q_eq = J_P * M + (J_P + M * l^2) * (2 * m + (2 * I) / (r^2));
+
+% Các phần tử cơ học gốc khi đầu vào là tổng mô-men (T_L + T_R)
+A23 = -(M^2 * l^2 * g) / Q_eq;
+A43 =  (M * l * g * (M + 2 * m + (2 * I) / (r^2))) / Q_eq;
+
+B21_torque =  (J_P + M * l^2 + M * l * r) / (Q_eq * r);
+B41_torque = -((M * l) / r + M + 2 * m + (2 * I) / (r^2)) / Q_eq;
+
+%% 3. XÂY DỰNG MA TRẬN A (4x4) VÀ B (4x1) VỚI ĐẦU VÀO LÀ ĐIỆN ÁP Va (Volt)
+% Phương trình động cơ cho 2 bánh cùng nhận điện áp Va:
+% T_L + T_R = (2*Km_phi/Ra)*Va - (2*Km_phi*Ke_phi/(Ra*r))*x_dot
+k_u = (2 * Km_phi) / Ra;                % Hệ số chuyển đổi Điện áp Va -> Tổng mô-men
+k_v = (2 * Km_phi * Ke_phi) / (Ra * r); % Hệ số cản nhớt điện từ theo x_dot
+
+A22 = -B21_torque * k_v;
+A42 = -B41_torque * k_v;
+
+B21 =  B21_torque * k_u;
+B41 =  B41_torque * k_u;
+
+% Vector trạng thái (4x1): x = [x; x_dot; theta_P; theta_P_dot]
+% Vector đầu vào (1x1):    u = Va (Volt)
+A = [0,   1,   0, 0;
+     0, A22, A23, 0;
+     0,   0,   0, 1;
+     0, A42, A43, 0];
+
+B = [  0;
+     B21;
+       0;
+     B41];
+
+% Ma trận đầu ra C (Chọn 2 đầu ra chính để phân tích Cực-Không & Bode: Vị trí x và Góc nghiêng theta_P)
+C_full  = eye(4);
+D_full  = zeros(4, 1);
+C_theta = [0, 0, 1, 0]; % Đầu ra là góc nghiêng theta_P (rad)
+C_pos   = [1, 0, 0, 0]; % Đầu ra là vị trí x (m)
+
+fprintf('================ 1. MA TRAN KHONG GIAN TRANG THAI ================\n');
+disp('Ma tran A (4x4):'); disp(A);
+disp('Ma tran B (4x1):'); disp(B);
+
+%% 4. ĐÁNH GIÁ TÍNH ỔN ĐỊNH HỆ HỞ, ĐIỀU KHIỂN ĐƯỢC & QUAN SÁT ĐƯỢC
+fprintf('================ 2. DANH GIA HE THONG HO (OPEN-LOOP) ================\n');
+poles_ol = eig(A);
+fprintf('Toa do cac Diem cuc he ho (Open-Loop Poles = eig(A)):\n');
+disp(poles_ol);
+
+if any(real(poles_ol) > 0)
+    fprintf('=> [ĐÁNH GIÁ HỆ HỞ]: KHÔNG ỔN ĐỊNH (Unstable) do có cực dương s = +%.4f\n', max(real(poles_ol)));
+else
+    fprintf('=> [ĐÁNH GIÁ HỆ HỞ]: Ổn định.\n');
+end
+
+% Kiểm tra tính điều khiển được (Controllability) & quan sát được (Observability)
+rank_Tc = rank(ctrb(A, B));
+rank_To = rank(obsv(A, [C_pos; C_theta]));
+fprintf('=> Hang ma tran Dieu khien duoc: %d / 4\n', rank_Tc);
+fprintf('=> Hang ma tran Quan sat duoc (tu x va theta_P): %d / 4\n\n', rank_To);
+
+%% 5. THIẾT KẾ BỘ ĐIỀU KHIỂN LQR & ĐÁNH GIÁ ỔN ĐỊNH HỆ KÍN
+% Trọng số phạt trạng thái Q (4x4) và phạt điện áp R (1x1)
+q1_x         = 50.0;    % Phạt sai số vị trí x (m)
+q2_x_dot     = 1.0;     % Phạt vận tốc dài x_dot (m/s)
+q3_theta     = 500.0;   % Phạt góc nghiêng theta_P (rad)
+q4_theta_dot = 1.0;     % Phạt vận tốc góc nghiêng theta_P_dot (rad/s)
+
+Q = diag([q1_x, q2_x_dot, q3_theta, q4_theta_dot]);
+R = 1.0;                % Trọng số phạt điện áp phần ứng Va (Volt)
+
+[K, P_riccati, poles_cl] = lqr(A, B, Q, R);
+
+fprintf('================ 3. KET QUA LQR & ON DINH HE KIN ================\n');
+fprintf('Vector he so phan hoi K (1x4):\n');
+disp(K);
+
+% Kiểm tra điều kiện ổn định hệ kín: A_cl = A - B*K
+A_cl = A - B * K;
+poles_cl_check = eig(A_cl);
+fprintf('Toa do cac Diem cuc he kin (Closed-Loop Poles = eig(A - B*K)):\n');
+disp(poles_cl_check);
+
+if all(real(poles_cl_check) < -1e-6)
+    fprintf('=> [ĐÁNH GIÁ HỆ KÍN]: HỆ THỐNG ỔN ĐỊNH TIỆM CẬN (Asymptotically Stable)!\n');
+    fprintf('   (Tất cả 4 cực hệ kín đều nằm bên trái trục ảo, Re(s) < 0).\n\n');
+else
+    warning('=> [CẢNH BÁO]: Hệ kín KHÔNG ổn định!\n\n');
+end
+
+fprintf('--- COPY DONG CODE C DUOI DAY VAO STM32 ---\n');
+fprintf('float K1 = %.4ff, K2 = %.4ff, K3 = %.4ff, K4 = %.4ff;\n\n', K(1), K(2), K(3), K(4));
+
+%% 6. PHÂN TÍCH TỌA ĐỘ CỰC - KHÔNG (POLE-ZERO) & DỰ TRỮ ỔN ĐỊNH BODE
+fprintf('================ 4. TOA DO CUC - KHONG & DU TRU BODE ================\n');
+
+% A. Hàm truyền từ Điện áp Va -> Góc nghiêng theta_P (Hệ hở & Hệ kín)
+sys_ol_theta = tf(ss(A, B, C_theta, 0));
+sys_cl_theta = tf(ss(A_cl, B, C_theta, 0));
+
+[zeros_ol_theta, poles_ol_theta, k_gain_theta] = zpkdata(sys_ol_theta, 'v');
+[zeros_cl_theta, poles_cl_theta, ~]            = zpkdata(sys_cl_theta, 'v');
+
+fprintf('1. Ham truyen He ho G_theta(s) = Theta_P(s) / Va(s):\n');
+zpk(sys_ol_theta)
+fprintf('   - Toa do Zero (Diem khong) cua G_theta(s):\n'); disp(zeros_ol_theta);
+fprintf('   - Toa do Pole (Diem cuc) cua G_theta(s):\n');   disp(poles_ol_theta);
+
+% B. Hàm truyền Vòng hở LQR: L(s) = K * (sI - A)^(-1) * B (Cắt vòng tại đầu vào u = Va)
+% Dùng để đánh giá Dự trữ biên (Gain Margin) và Dự trữ pha (Phase Margin) của bộ LQR
+sys_loop_LQR = ss(A, B, K, 0);
+[GM, PM, Wcg, Wcp] = margin(sys_loop_LQR);
+fprintf('2. Danh gia Du tru On dinh tren Bieu do Bode (Loop Transfer Function L(s)):\n');
+fprintf('   - Du tru bien (Gain Margin - GM) : %.2f dB (tai tan so %.2f rad/s)\n', 20*log10(GM), Wcg);
+fprintf('   - Du tru pha (Phase Margin - PM) : %.2f deg (tai tan so cat %.2f rad/s)\n\n', PM, Wcp);
+
+%% 7. VẼ CÁC ĐỒ THỊ PHÂN TÍCH (3 CỬA SỔ ĐỒ HỌA)
+
+% --- HÌNH 1: BẢN ĐỒ TỌA ĐỘ CỰC - KHÔNG (POLE-ZERO MAP) ---
+figure('Name', '1. Toa do Cuc - Khong (Pole-Zero Map)', 'Color', 'w', 'Position', [80, 100, 1000, 480]);
+
+subplot(1, 2, 1);
+pzmap(sys_ol_theta); hold on;
+xline(0, 'r--', 'LineWidth', 1.2);
+grid on;
+title('Pole-Zero Map He Ho: G_{\theta}(s) = \Theta_P(s)/V_a(s)');
+
+subplot(1, 2, 2);
+pzmap(sys_cl_theta); hold on;
+xline(0, 'k--', 'LineWidth', 1.2);
+grid on;
+title('Pole-Zero Map He Kin LQR (Tat ca cuc Re(s) < 0)');
+
+% --- HÌNH 2: BIỂU ĐỒ BODE (BODE DIAGRAM & STABILITY MARGINS) ---
+figure('Name', '2. Bieu do Bode (Bode Plot & Stability Margins)', 'Color', 'w', 'Position', [120, 80, 1050, 550]);
+
+subplot(1, 2, 1);
+margin(sys_loop_LQR); % Vẽ Bode kèm hiển thị trực tiếp Gain Margin & Phase Margin
+grid on;
+
+subplot(1, 2, 2);
+bode(sys_ol_theta, 'r--', sys_cl_theta, 'b', {1e-1, 1e3});
+grid on;
+title('So sanh Bode: He ho vs He kin (\Theta_P / V_a)');
+legend('He ho G_{\theta}(s)', 'He kin LQR T_{\theta}(s)', 'Location', 'southwest');

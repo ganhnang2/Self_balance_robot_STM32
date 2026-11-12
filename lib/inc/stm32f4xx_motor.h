@@ -43,14 +43,32 @@
 #define ENCODER_MM_PER_COUNT \
     ((3.14159265f * WHEEL_DIAMETER_MM) / ENCODER_COUNTS_PER_WHEEL_REV)
 
+#define MOTOR_LEFT_SIDE             0UL
+#define MOTOR_RIGHT_SIDE            1UL
+
+/**
+ * @brief  EMA smoothing factor for Motor_Get_Velocity() (0 < α ≤ 1).
+ *
+ *  velocity_ema = α * raw_velocity + (1 − α) * velocity_ema_prev
+ *
+ *  - α → 1 : faster tracking, less smoothing (use at longer Δt, e.g. 50 ms)
+ *  - α → 0 : heavier smoothing, more lag    (use at shorter Δt, e.g. 5 ms)
+ *
+ *  Default 0.15 is a reasonable starting point for Δt ≈ 10 ms.
+ *  Tune upward if the velocity response feels sluggish.
+ */
+#define MOTOR_EMA_ALPHA             0.15f   /*!< EMA smoothing factor (0 < α ≤ 1) */
+
 /* =========================================================================
  * Encoder State Structure
  * ========================================================================= */
 typedef struct
 {
-    uint16_t prevCnt;       /*!< CNT register snapshot from the last update    */
-	uint16_t currCnt;		/*!< CNT register snapshot from the current update    */
-    int32_t  deltaCounts;   /*!< Signed pulse count since last Motor_Encoder_Update() */
+    uint16_t prevCnt;       /*!< CNT register snapshot from the last update          */
+    uint16_t currCnt;       /*!< CNT register snapshot from the current update       */
+    int32_t  deltaCounts;   /*!< Signed pulse count since last Motor_Encoder_Update()*/
+    float    positionMM;    /*!< Accumulated linear position in mm (Motor_Get_Position) */
+    float    velocityEMA;   /*!< EMA-filtered wheel velocity in mm/s (Motor_Get_Velocity) */
 } Encoder_t;
 
 /* =========================================================================
@@ -148,5 +166,72 @@ uint32_t Motor_Get_Encoder_Counter_Left(void);
  * @return uint32_t  Current TIM4->CNT snapshot captured at the last Motor_Encoder_Update().
  */
 uint32_t Motor_Get_Encoder_Counter_Right(void);
+
+/**
+ * @brief  Return the accumulated linear position (mm) of the selected wheel.
+ *
+ *         Position is accumulated inside Motor_Encoder_Update() on every call:
+ *           positionMM += deltaCounts * ENCODER_MM_PER_COUNT
+ *
+ *         This getter is side-effect-free — safe to call multiple times per
+ *         sample period without double-counting.
+ *         The value starts at 0.0 after Motor_Encoder_Reset() and grows
+ *         (positive = forward, negative = backward) indefinitely.
+ *
+ * @param  side   0 → Left wheel (TIM1), non-zero → Right wheel (TIM4).
+ * @return float  Accumulated position in millimetres.
+ */
+float Motor_Get_Position(uint8_t side);
+
+/**
+ * @brief  Return the EMA-smoothed wheel velocity in mm/s.
+ *
+ *         Raw velocity is derived from the latest deltaCounts divided by the
+ *         elapsed time deltaT, then blended with the previous filtered value
+ *         using an Exponential Moving Average (EMA) filter:
+ *
+ *           raw_vel  = (deltaCounts * ENCODER_MM_PER_COUNT) / deltaT
+ *           vel_EMA  = α * raw_vel + (1 − α) * vel_EMA_prev
+ *
+ *         The EMA suppresses quantisation noise that appears when deltaT is
+ *         very short and deltaCounts resolves to only 0 or ±1 counts.
+ *         Tune MOTOR_EMA_ALPHA (header) to trade off responsiveness vs. noise.
+ *
+ * @param  side    0 → Left wheel, non-zero → Right wheel.
+ * @param  deltaT  Elapsed time since the last call, in seconds (> 0).
+ *                 Typically the fixed sampling period of the control loop.
+ * @return float   EMA-filtered wheel velocity in mm/s
+ *                 (positive = forward, negative = backward).
+ */
+float Motor_Get_Velocity(uint8_t side, float deltaT);
+
+/**
+ * @brief  Return the EMA-filtered linear velocity of the robot chassis (mm/s).
+ *
+ *         For a differential drive robot, the chassis translational velocity
+ *         is the arithmetic mean of the two wheel rim velocities:
+ *
+ *           v_chassis = (v_left + v_right) / 2
+ *
+ *         Internally calls Motor_Get_Velocity() for both sides, so the EMA
+ *         state of each wheel encoder is updated as a side-effect.
+ *         Call AFTER Motor_Encoder_Update() every sample period.
+ *
+ * @param  deltaT  Elapsed time since the last call, in seconds (> 0).
+ * @return float   EMA-filtered chassis linear velocity in mm/s.
+ *                 Positive = forward, Negative = backward.
+ */
+float Motor_Get_Chassis_Linear_Velocity(float deltaT);
+
+/**
+ * @brief  Return the accumulated linear position of the robot chassis (mm).
+ *
+ *         Chassis position = (positionMM_left + positionMM_right) / 2.
+ *         Accumulated inside Motor_Encoder_Update() — side-effect-free getter.
+ *         Reset to 0.0 by Motor_Encoder_Reset().
+ *
+ * @return float  Chassis position in mm (positive = forward, negative = backward).
+ */
+float Motor_Get_Chassis_Position(void);
 
 #endif /* STM32F4XX_MOTOR_H_ */

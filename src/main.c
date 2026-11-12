@@ -1,503 +1,430 @@
 /**
  * @file    main.c
- * @author  Nguyen Hai Nam
- * @brief   Chương trình chính điều khiển Xe Tự Cân Bằng 2 Bánh (Self-Balancing Robot).
- * 
- * @details Firmware điều khiển thời gian thực trên vi điều khiển STM32F401CCU6 (Black Pill):
- *          - Vòng lặp điều khiển kín (Closed-loop Control Loop) chạy trong ngắt TIM2 chu kỳ 20ms (50Hz).
- *          - Thu thập dữ liệu cảm biến MPU6050 qua I2C1 và ước lượng góc nghiêng bằng Kalman Filter.
- *          - Thuật toán điều khiển Cascade PID: Vòng Vận tốc (ngoài) + Vòng Cân bằng (trong).
- *          - Điều khiển 2 động cơ DC JGA25-370 có gắn Encoder qua driver cầu H TB6612FNG (TIM3 PWM 12.5kHz).
- *          - Đo đạc vận tốc qua 2 kênh Encoder phần cứng (TIM1 & TIM4 Encoder Mode).
- *          - Giao tiếp không dây qua module Bluetooth HC-05 (USART2) để nhận lệnh điều hướng và Tune thông số PID.
- *          - Hiển thị góc nghiêng và thông số hệ thống thời gian thực lên màn hình OLED 128x64 (I2C2).
+ * @author  Nam Nguyen Hai
+ * @brief   Main application for STM32F401CCU6 Two-Wheeled Self-Balancing Robot.
  *
- * @note    Danh sách phần cứng sử dụng:
- *          1. MCU: STM32F401CCU6 (ARM Cortex-M4, Black Pill)
- *          2. Cảm biến góc: MPU-6050 (6-DOF IMU)
- *          3. Màn hình: SSD1306 OLED 128x64 (I2C)
- *          4. Mạch công suất: Driver TB6612FNG
- *          5. Động cơ: 2x Motor JGA25-370 có đĩa Encoder từ tính (Hall)
- *          6. Giao tiếp: Module Bluetooth HC-05 (UART)
+ * @details Implements a Linear Quadratic Regulator (LQR) full state-feedback
+ *          controller running in a hard real-time 200 Hz (5 ms) timer interrupt (TIM2).
+ *          Sensor fusion (MPU-6050 + Kalman Filter) and chassis odometry (Quadrature Encoders)
+ *          feed the 4 continuous states [position, velocity, pitch angle, pitch rate]
+ *          into the optimal control law:
  *
- * @note    
- * 1. Sơ đồ đấu nối chân (Pin Configuration):
- *          + TB6612FNG:
- *            - AIN1: PB13, AIN2: PB12 (Chiều quay Motor Phải)
- *            - BIN1: PB14, BIN2: PB15 (Chiều quay Motor Trái)
- *            - PWMA: PB4 (TIM3_CH1), PWMB: PB5 (TIM3_CH2) - PWM 12.5kHz
- *            - STBY: PA12 (Standby Enable)
- *          + Encoder (Đo vận tốc):
- *            - Motor Trái (TIM1): ENC1_A = PA8, ENC1_B = PA9
- *            - Motor Phải (TIM4): ENC2_A = PB7, ENC2_B = PB6
- *          + MPU-6050 (I2C1):
- *            - SCL: PB8, SDA: PB9
- *          + OLED SSD1306 (I2C2):
- *            - SCL: PB10, SDA: PB3
- *          + HC-05 Bluetooth (USART2):
- *            - TXD (MCU): PA2 -> RXD (HC-05)
- *            - RXD (MCU): PA3 <- TXD (HC-05)
- *            - KEY/STATE: PA1
- * 2. Công thức quy đổi từ xung/delta_ms sang vòng/phút:
- * 			DeltaN			60000
- * RPM = ----------- * -------------
- *			CPR				T_ms
- * trong đó:
- * - RPM	: Số xòng quay được trên một phút (Motor được sử dụng dự án này có rpm tối đa là 280)
- * - deltaN	: Số xung đọc được trong khoảng thời gian lấy mẫu (Ví dụ: 10ms)
- * - CPR   	: Số xung trên một vòng bánh xe (đã tính x4 và hộp số). Trong dự án này, CPR = 937 xung/vòng
- * - T_ms  	: Chu kỳ lấy mẫu tính bằng ms
- * 
- * Ví dụ: T = 25ms, DeltaN = 110 xung (Xung tối đa đo được trong 40ms)
- * 			110			60000
- * RPM = ----------- * ------- = 0.113 * 2400 = 281.7 rpm (Xấp xỉ 280 rpm) 
- *			937			 25
- * => Kết quả này khớp tốc độ không tải 280 RPM trong datasheet.
- * 3. Quy đổi từ rpm sang m/s
- * 			RPM
- * v = ------------ * 2 * PI * R
- *			60
- * trong đó:
- * - v		: Vận tốc của bánh xe (đơn vị: m/s)
- * - RPM	: Số vòng/phút của bánh xe (không phải trục motor trước hộp số)
- * - R		: Bán kính bánh xe tính bằng mét (D = 65mm -> R = 0.0325 m)
- * 4. Quy đổi từ giá trị PWM Output (0 - 1250) ra tốc độ động cơ
- *			PWM Output
- * RPM = --------------- * 281
- *			  1250
+ *              Va = - [ K1*(p - p_ref) + K2*(v - v_ref) + K3*(theta - theta_ref) + K4*omega ]
+ *
+ *          The background loop handles online parameter tuning via Bluetooth (HC-05),
+ *          remote directional steering and real-time IMU telemetry.
+ *
+ * @note    Per user request, OLED display updates are omitted to keep the execution
+ *          lean and focused on real-time motor control and telemetry streaming.
  */
 
-#include <stdio.h>
-#include <string.h>
-#include <math.h>
+#include <stdint.h>
 #include <stdbool.h>
-#include "stm32f4xx_lib.h"		// Thư viện các linh kiện 
-#include "stm32f4xx.h"			// Các driver được phát triển
-#include "pin_config.h"			// Cấu hình chân GPIO cho toàn bộ dự án
-#include "nvic_config.h"		// Cấu hình interrupt và priority interrupt cho toàn bộ dự án
+#include <math.h>
+#include <string.h>
 
-/*****************************************************************************/
-/*							SYMBOLIC CONSTANTS								 */
-/*****************************************************************************/
-/* Hằng số PI */
-#define PI						3.14159265f
+/* CMSIS & Architecture Headers */
+#include "stm32f4xx.h"
+#include "core_cm4.h"
 
-/* Góc cân bằng tĩnh */
-#define ANGLE_BIAS				0.456f
+/* Board Configuration & Peripheral Drivers */
+#include "pin_config.h"
+#include "nvic_config.h"
+#include "stm32f4xx_utils.h"
 
-#define ALPHA					0.98f
+/* External Component Libraries */
+#include "stm32f4xx_motor.h"
+#include "stm32f4xx_mpu6050.h"
+#include "stm32f4xx_kalman.h"
+#include "stm32f4xx_lqr.h"
+#include "stm32f4xx_hc05.h"
 
-/* Hằng số áp dụng cho PID vận tốc (PID VELOCITY) */
-#define MAX_TARGET_ANGLE		5.0f			// Độ nghiêng tối đa được phép (targetAngle): 5 độ
-#define SPEED_MAX_STEP			219.0f			// Vận tốc tối đa mong muốn (xung/50ms)
-#define SPEED_ACCEL_RATE		0.25f			// Gia tốc cho độ tăng của góc đặt
-#define	PID_VEL_DT				0.05f			// Tần số lấy mẫu: 10Hz (100 ms)
+/* =========================================================================
+ * Physical Constants & Control Tuning Defines
+ * ========================================================================= */
+#define CONTROL_LOOP_FREQ_HZ        200.0f                          /*!< Control loop frequency: 200 Hz */
+#define CONTROL_LOOP_DT             (1.0f / CONTROL_LOOP_FREQ_HZ)   /*!< Sampling time dt: 0.005 s (5 ms) */
 
-/* Hằng số áp dụng vòng PID cân bằng (PID BALANCE) */
-#define FALL_ANGLE				45.0f			// Góc khiến cho xe bị ngã
-#define MOTOR_DEADBAND			100				// Vùng deadband - motor không thể quay được (Lấy từ sau khi thực nghiệm)
-#define MOTOR_DEADBAND_THRES 	8				// Chỉ bù deadband khi |lệnh| lớn hơn ngưỡng này
-#define MOTOR_MAX_SPEED			2000			// Tốc độ tối đa được phép để điều khiển motor
-#define PID_BALANCE_DT			0.005f			// Tần số lấy mẫu: 200Hz (5 ms)
+#define DEG_TO_RAD                  (3.14159265f / 180.0f)          /*!< Conversion factor degrees to radians */
+#define RAD_TO_DEG                  (180.0f / 3.14159265f)          /*!< Conversion factor radians to degrees */
 
-/* Hằng số áp dụng cho vòng rẽ hướng (PID STEERING) */
-#define TARGET_YAW_RATE      	60.0f  			// Tốc độ xoay mong muốn khi rẽ (độ/giây)
-#define MAX_TURN_PWM         	250	    		// Giới hạn PWM tối đa dành cho rẽ
-#define PID_STEERING_DT			0.01f			// Tần số lấy mẫu: 100Hz (10 ms)
+/* Safety Failsafe Limits */
+#define FALLEN_ANGLE_LIMIT_DEG      35.0f                           /*!< Emergency cutoff if |pitch| > 35° */
+#define RECOVERY_ANGLE_LIMIT_DEG    3.0f                            /*!< Auto re-enable when |pitch| < 3° */
 
-/* Giới hạn hợp lệ của dt đo được (giây) */
-#define DT_MAX_VALID			0.05f			
+/* Motor & Actuator Parameters */
+#define BATTERY_VOLTAGE             12.0f                           /*!< Nominal battery pack voltage (V) */
+#define PWM_MAX_ARR                 1999                            /*!< TIM3 ARR for 12.5 kHz PWM */
+#define MOTOR_DEADBAND_PWM          200                            	/*!< Deadband compensation count */
 
-/*****************************************************************************/
-/*								DATA TYPES									 */
-/*****************************************************************************/
-typedef enum {
-    BCT_STATE_INIT      = 0,
-    BCT_STATE_IDLE      = 1,
-    BCT_STATE_BALANCING = 2,
-    BCT_STATE_FALLEN    = 3
-} Robot_State_t;
+/* Motion & Steering Targets */
+#define DRIVE_VELOCITY_TARGET       0.25f                           /*!< Target forward/reverse velocity (m/s) */
+#define STEERING_VOLTAGE_STEP       1.8f                            /*!< Differential turning voltage (V) */
 
-/*****************************************************************************/
-/*							GLOBAL VARIABLES								 */
-/*****************************************************************************/
-MPU6050_t imu;
-PID_t pidVelocity;
-PID_t pidBalance;
-PID_t pidSteering;
-Kalman_t kalmanPitch;
-Complementary_Filter_t cp;
-HC05_Device_t hc05Dev;
+#define TELEMETRY_DECIMATION        8U                              /*!< Telemetry every 8 ticks (40 ms = 25 Hz) */
 
-volatile HC05_DirectionCode_t direction = DIR_NONE;
-volatile uint8_t DataReady = 0;
+/* =========================================================================
+ * Global Hardware & Library Handles
+ * ========================================================================= */
+static MPU6050_t     g_mpu6050;
+static Kalman_t      g_kalman;
+static LQR_t         g_lqr;
+static HC05_Device_t g_hc05;
 
-// Hai biến để kiểm tra thời gian thực thi (Debug chương trình)
+/* =========================================================================
+ * System State Variables
+ * ========================================================================= */
+static volatile float g_pitch_deg        = 0.0f;    /*!< Current estimated pitch angle (degrees) */
+static volatile float g_gyro_y_dps       = 0.0f;    /*!< Calibrated pitch angular velocity (°/s) */
+static volatile float g_theta_offset_deg = -1.27f;  /*!< Mechanical balance equilibrium trim angle */
+static volatile float g_steering_voltage = 0.0f;    /*!< Turning differential voltage (V) */
+static volatile bool  g_robot_enabled    = false;   /*!< Active balance control state flag */
+static volatile uint8_t g_telemetry_flag = 0;       /*!< Flag to trigger Bluetooth telemetry in main */
 
-// Tổng thời gian thực hiện ngắt (us) -> 602us ~= 0.6ms (Debug)
-// volatile uint32_t isr_execution_time_us = 0;				
+/* =========================================================================
+ * Private Function Prototypes
+ * ========================================================================= */
+static void ControlLoop_Timer_Init(void);
+static int32_t Voltage_To_PWM(float voltage, float deadband);
 
-// Tổng thời gian thực hiện việc in lên màn hình OLED + USART2 (us) theo kiểu Polling -> 53356us ~= 53.356ms (Debug)	
-// volatile uint32_t display_execution_time_us = 0;				
-									
-// Pith and Roll angle of robot
-volatile float pitch = 0.0f;
-
-// Các biến toàn cục được sử dụng trong hàm và ngắt
-volatile uint32_t timer = 0;					// Timer để thực hiện đo chính xác thời gian xảy ra giữa 2 lần ngắt
-volatile float currentTargetAngle = 0.0f;		// Góc mục tiêu sau khi Ramp
-volatile float targetAngle = 0.0f;				// Góc mục tiêu từ vòng Velocity (ISR())
-volatile float filteredSpeed = 0.0f;			// Tốc độ sau LPF (ISR())
-volatile uint8_t velCount = 0;					// Bộ đếm kích hoạt vòng Velocity (ISR())
-
-/*****************************************************************************/
-/*								FUNCTION									 */
-/*****************************************************************************/
-void TIMControlLoop_Init(void)
+/* =========================================================================
+ * Main Entry Point
+ * ========================================================================= */
+int main(void)
 {
-	RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;    			// Cấp xung nhịp cho TIM2
+    /* 1. Core & FPU Initialization (handled in SystemInit, verified here) */
+    enable_FPU();
+
+    /* 2. Configure Hardware GPIO Pins
+     *    - PC13: On-board Blue LED
+     *    - PA1, PA2, PA3: HC-05 Bluetooth
+     *    - PB8, PB9: MPU-6050 I2C1
+     *    - PA12, PB12-PB15, PB4-PB5: TB6612 Motor Driver (Direction + TIM3 PWM)
+     *    - PA8-PA9, PB6-PB7: Wheel Encoders (TIM1 & TIM4)
+     */
+    Pin_Config_All();
+
+    /* 3. Configure NVIC Priority Grouping and Interrupts */
+    NVIC_Config_All();
+
+    /* 4. Initialize Actuators & Motor Encoders */
+    TB6612_Init();
+    TB6612_Coast();
+    Motor_Encoder_Init();
+
+    /* 5. Initialize HC-05 Bluetooth Interface (USART2 @ 115200 baud) */
+    HC05_Init(&g_hc05, NULL);
+
+    /* 6. Initialize LQR Controller Structure */
+    LQR_Init(&g_lqr);
+    g_lqr.deadband_pwm = MOTOR_DEADBAND_PWM;
+    g_lqr.max_voltage  = BATTERY_VOLTAGE;
+
+    /* 7. Initialize Kalman Filter for Pitch Estimation */
+    Kalman_Init(&g_kalman);
 	
-	TIM2->PSC = SystemCoreClock / 1000000UL - 1;	// Cấu hình tần số Timer về 1MHz (1 us/tick)
-	TIM2->ARR = 5000 - 1;                 			// 5000 us = 5ms (200Hz)
-	TIM2->DIER |= TIM_DIER_UIE;            			// Bật ngắt Update
-	TIM2->CR1 |= TIM_CR1_CEN;              			// Chạy Timer
-}
-
-void Robot_Reset_All(void)
-{
-	PID_Reset_State(&pidVelocity);
-	PID_Reset_State(&pidBalance);
-	PID_Reset_State(&pidSteering);
-	
-	currentTargetAngle = 0.0f;
-	filteredSpeed = 0.0f;
-	targetAngle = 0.0f;
-	velCount = 0UL;
-}
-
-int32_t Robot_Apply_Deadband(int32_t cmd)
-{
-	int32_t magnitude = (cmd >= 0) ? cmd : -cmd;
-
-	if (magnitude <= MOTOR_DEADBAND_THRES)
-	{
-		return 0;
-	}
-
-	// Tăng bù tuyến tính từ 0 đến MOTOR_DEADBAND.
-	int32_t compensation = MOTOR_DEADBAND * (magnitude - MOTOR_DEADBAND_THRES) / (MOTOR_MAX_SPEED - MOTOR_DEADBAND_THRES);
-	int32_t output = magnitude + compensation;
-
-	if (output > MOTOR_MAX_SPEED)
-	{
-		output = MOTOR_MAX_SPEED;
-	}
-
-	return (cmd >= 0) ? output : -output;
-}
-
-int32_t Robot_Clamp_I32(int32_t value, int32_t limit)
-{
-	if (value > limit)
-	{
-		return limit;
-	}
-	if (value < -limit)
-	{
-		return -limit;
-	}
-	return value;
-}
-
-/* - Vòng PID này nhận input: 
-		+) input: targetAngle (Đơn vị: độ), currentAngle (Đơn vị: độ), pitchRate (Đơn vị: rad/s)
-		+) output: PWM Output (Đơn vị: giá trị so sánh thuộc [-1500, 1500] - Timer sử dụng để băm xung PWM)
-   - Góc quay được sử dụng ở đây là Pitch (trục Y) 
-   - Quy ước: Góc dương, động cơ cũng sẽ xuất xung dương và ngược lại.
-*/
-int32_t PID_Balance(float targetAngle, float currentAngle, float dt)
-{	
-	int32_t baseCmd = (int32_t)PID_Compute_Advanced(&pidBalance, targetAngle, currentAngle, dt); 
-	return baseCmd;
-}
-
-/****************************************************************************/
-/*							INTERRUPT HANDLING								*/
-/****************************************************************************/
-// Trình phục vụ ngắt của USART2 để nhận dữ liệu về tham số Kp, Ki, Kd từ máy tính
-void USART2_IRQHandler(void)
-{
-	HC05_IRQ_Handler(&hc05Dev);
-}
-
-// Trình phục vụ ngắt của I2C2_TX để thực hiện việc truyền dữ liệu lên OLED128x64
-void DMA1_Stream7_IRQHandler(void)
-{
-	OLED_DMA_IRQ_Handler();
-}
-
-// Trình phục vụ ngắt của TIM2 (Hardware nhảy vào đây mỗi 10ms)
-void TIM2_IRQHandler(void) {
-	if (TIM2->SR & TIM_SR_UIF) { // Kiểm tra cờ ngắt Update
-		TIM2->SR &= ~TIM_SR_UIF; // Xóa cờ ngắt
-
-		// Đọc dữ liệu (Tốn ~0.35ms)
-		MPU6050_ReadScaledData(&imu);
-		
-		float ax = imu.ScaledData.Accel_X, ay = imu.ScaledData.Accel_Y, az = imu.ScaledData.Accel_Z;
-		float gx = imu.ScaledData.Gyro_X, gy = imu.ScaledData.Gyro_Y, gz = imu.ScaledData.Gyro_Z;
-		
-		// Tính góc thô từ gia tốc kế
-		float accelAngle = atan2f(-ax, sqrtf(az*az + ay*ay)) * (180.0f / PI);
-		
-		uint32_t currentTick = System_Get_Tick();
-		float dt = (float)(uint32_t)(currentTick - timer) / (float)SystemCoreClock;
-		
-		if (dt <= 0.0f || dt > DT_MAX_VALID)
-		{
-			dt = PID_BALANCE_DT;
-		}
-		
-		// Cập nhật Kalman Filter (dt chính xác tuyệt đối = 0.010s)
-		// float pitch_kalman = Kalman_GetAngle(&kalmanPitch, pitch_kalman, gy, dt);
-		cp.angle = Complementary_Compute(&cp, cp.angle, gy, accelAngle, dt);
-		
-		// Cập nhật mốc thời gian
-		timer = currentTick;
-		
-		// Đẩy ra biến toàn cục để main() có thể in
-		pitch = cp.angle;
-		
-		// Báo hiệu có dữ liệu mới
-		DataReady = 1; 
-
-		// Chốt chặn an toàn: Ngắt khẩn cấp động cơ nếu góc nghiêng quá lớn (xe bị ngã)
-		if ((cp.angle > FALL_ANGLE) || (cp.angle < -FALL_ANGLE))
-		{
-			TB6612_Short_Brake();		// Cho xe dừng hẳn
-			
-			// Reset lại trạng thái Robot
-			Robot_Reset_All();
-			return;
-		}
-
-		/* Hai thông số cho vòng kín PID cân bằng */
-		/* targetAngle được cập nhật từ vòng PID vận tốc (20Hz/ 50ms) */
-		float currentAngle = 0.0f;					// Actual (Được đo bằng MPU6050)
-		
-		int32_t baseMotorSpeed = 0;
-		int32_t leftMotorSpeed = 0;
-		int32_t rightMotorSpeed = 0;
-		
-		/************************PID BALANCE (PD CONTROLLER)****************************/
-		// 1. Chọn trục nghiêng điều khiển (trong dự án này là trục Y - Pitch)
-		currentAngle = cp.angle + ANGLE_BIAS;
-
-		// 2. Tính toán thuật toán PID
-		baseMotorSpeed = PID_Balance(0.0f, currentAngle, dt);
-		
-		/***********************************PWM OUTPUT*****************************/
-		// Phân phối vi sai cho 2 bánh
-		leftMotorSpeed  = baseMotorSpeed;
-		rightMotorSpeed = baseMotorSpeed;
-		
-		// Bù deadband cho 2 động cơ
-		leftMotorSpeed  = Robot_Apply_Deadband(leftMotorSpeed);
-		rightMotorSpeed = Robot_Apply_Deadband(rightMotorSpeed);
-		
-		// Giới hạn công suất tối đa của motor [-1250, 1250] (Clamping)
-		leftMotorSpeed  = Robot_Clamp_I32(leftMotorSpeed,  MOTOR_MAX_SPEED);
-		rightMotorSpeed = Robot_Clamp_I32(rightMotorSpeed, MOTOR_MAX_SPEED);
-		
-		// Xuất điều khiển 2 bánh qua cầu H TB6612
-		TB6612_Control_Motors((int32_t)leftMotorSpeed, (int32_t)rightMotorSpeed);
-	}
-}
-
-/****************************************************************************/
-/*							MAIN FUNCTION									*/
-/****************************************************************************/
-int main()
-{
-	/*************************************************************************************/
-	/*									  INITS										 	 */
-	/*************************************************************************************/
-	
-	/*************************************GPIO******************************************/
-	// Khởi tạo chân GPIO cho tất cả các chân linh kiện
-	Pin_Config_All();
-
-	/*************************************IMU*******************************************/
-	// Khởi tạo MPU6050 (Default: I2C1 peripheral)
-	// NOTE: Theo datasheet của InvenSense MPU-6050/6500, mạch cấp nguồn bên trong và khối xử ý số (Digital Interface) 
-	// cần từ 30ms đến 100ms để điện áp ổn định hoàn toàn trước khi bus I2C có thể phản hồi lệnh
+	/* 8. Initialize MPU-6050 6-DoF IMU (Fast Mode 400 kHz on I2C1) */
 	uint8_t count = 0;
-	while (MPU6050_Init(&imu, NULL) != MPU6050_OK)
+	while (MPU6050_Init(&g_mpu6050, NULL) != MPU6050_OK)
 	{
 		if (count >= 500)
 			break;
 		 count++;
 		delay(1);
 	}
-	
-	// Hiệu chỉnh con quay hồi chuyển (Gyro) trong MPU6050 (Bỏ comment nếu bị nhiễu)
-	MPU6050_CalibrateGyro(&imu, 500);
-	
-	// Hiệu chỉnh gia tốc kế (Accel) trong MPU6050 (Bỏ comment nếu bị nhiễu)
-	// MPU6050_CalibrateAccel(&imu, 500);
-	
-	/*************************************HC05*******************************************/
-	// Khởi tạo HC05 (Default: USART2 peripheral)
-	HC05_Init(&hc05Dev, NULL);
-	
-	/*************************************OLED*******************************************/
-	// Khởi tạo OLED (Default: I2C2 peripheral)
-	// Truyền dữ liệu bằng DMA + I2C2
-	OLED_Init(NULL);
-	OLED_DMA_Init(NULL);
-	
-	/*************************************MOTOR******************************************/
-	// Khởi tạo Encoder 
-	Motor_Encoder_Init();
-	
-	// Khởi tạo driver TB6612FNG
-	TB6612_Init();
-	
-	// Tắt hoàn toàn động cơ
-	TB6612_Control_Motors(0, 0);
-	
-	// Bật cầu H sau khi mọi thứ ở trạng thái an toàn
-	GPIO_Write_Pin(PIN_MOTOR_STBY_PORT, PIN_MOTOR_STBY_PIN, GPIO_PIN_SET);  
-	
-	/*************************************PID*******************************************/
-	// Khởi tạo 2 bộ điều khiển PID
-	// PID Angle: Bộ điều khiển có đầu ra là target angle
-	// PID Balance: Bộ điểu khiển đầu ra xuất tín hiệu ra động cơ để bám target angle
-	// PID Steering: Cho việc phân phối vi sai cho cả 2 bánh
-	PID_Init(&pidVelocity);
-	PID_Init(&pidBalance);
-	PID_Init(&pidSteering);
-	
-	// PID Velocity (PI Controller)
-	PID_Set_Max_Output(&pidVelocity, MAX_TARGET_ANGLE);
-	PID_Set_Max_Integral(&pidVelocity, 0.85f * MAX_TARGET_ANGLE);
-	PID_Set_Sampling_Time(&pidVelocity, PID_VEL_DT);
-	
-	// PID Balance (PID Controller)
-	PID_Set_Max_Output(&pidBalance, MOTOR_MAX_SPEED);		
-	PID_Set_Max_Integral(&pidBalance, 0.85f * MOTOR_MAX_SPEED);
-	PID_Set_Sampling_Time(&pidBalance, PID_BALANCE_DT);
-	
-	// PID Steering (PD Controller)
-	PID_Set_Max_Output(&pidSteering, MAX_TURN_PWM);
-	PID_Set_Sampling_Time(&pidSteering, PID_STEERING_DT);
-	
-	/********************************KALMAN FILTER*************************************/
-	// Khởi tạo Kalman Filter
-	Kalman_Init(&kalmanPitch);
-	
-	// Khởi tạo góc ban đầu để chống giật
-	// MPU6050_ReadScaledData(&imu);
-	// float initPitch = atan2f(-imu.ScaledData.Accel_X, sqrtf(imu.ScaledData.Accel_Z*imu.ScaledData.Accel_Z + imu.ScaledData.Accel_Y*imu.ScaledData.Accel_Y)) * (180.0f / PI);
-	// pitch = initPitch;
-	// Kalman_SetAngle(&kalmanPitch, initPitch);
-	
-	// Khởi tạo bộ lọc bù
-	Complementary_Init(&cp);
-	Complementary_Set_Alpha(&cp, ALPHA);
-	cp.angle = 0.0f;
-	
-	/**********************************INTERRUPT*************************************/
-	// Cấu hình ngắt và độ ưu tiên ngắt (TIM2 - Control Loop, USART2 - Data exchange)
-	NVIC_Config_All();
-	
-	// In ra khởi tạo
-	OLED_Clear_Buffer();
-	OLED_Print_String("Init OK!", 0, 25, OLED_COLOR_WHITE);
-	OLED_Update_Display_DMA();
-	
-	// Khởi tạo Timer cho chương trình
-	TIMControlLoop_Init();
-	timer = System_Get_Tick();			// Đo đạc bằng Timer
-	
-	float kp = 0.0f, ki = 0.0f, kd = 0.0f;
-	
-	/*************************************************************************************/
-	/*									  LOOP										 	 */
-	/*************************************************************************************/
-	while (1)
-	{
-		// Xác nhận xem có dữ liệu mới được gửi về
-		if (HC05_Receive_Frame(&hc05Dev, NULL) != 0)
-		{
-			// Tham số PID Tuning
-			if (HC05_Is_Parameter_New(&hc05Dev) != 0)
-			{
-				HC05_PID_Target_t target = HC05_Get_PID_Target(&hc05Dev);
-				HC05_Get_Tuning_Parameters(&hc05Dev, &kp, &ki, &kd);
-				
-				if (target == PID_TARGET_BALANCE)
-				{
-					pidBalance.kp = kp;
-					pidBalance.ki = ki;
-					pidBalance.kd = kd;
-				}
-				else if (target == PID_TARGET_VELOCITY)
-				{
-					// Đầu vào: số xung/100ms (khoảng 0 - 439) và đầu ra: degree (khoảng 0 - 10 độ)
-					// Do đó, để việc tính toán cxac thì ta lấy tham số Tuning chia cho 100
-					pidVelocity.kp = kp / 100.0f;
-					pidVelocity.ki = ki / 100.0f;
-					pidVelocity.kd = kd / 100.0f;
-				}
-				else if (target == PID_TARGET_STEERING)
-				{
-					pidSteering.kp = kp;
-					pidSteering.ki = ki;
-					pidSteering.kd = kd;
-				}
-				else
-				{
-					pidBalance.kp = kp;
-					pidBalance.ki = ki;
-					pidBalance.kd = kd;
-				}
-			}
-			
-			// Điều khiển hướng đi
-			if (HC05_Is_Direction_New(&hc05Dev) != 0)
-			{
-				direction = HC05_Get_Direction(&hc05Dev);
-			}
-		}
-		
-		if (DataReady) 
-		{	
-			// Tắt ngắt ngắn gọn CHỈ để copy dữ liệu volatile (không làm gì khác trong critical section)
-			__disable_irq();		
-			//float ax = imu.ScaledData.Accel_X, ay = imu.ScaledData.Accel_Y, az = imu.ScaledData.Accel_Z;
-			//float gx = imu.ScaledData.Gyro_X, gy = imu.ScaledData.Gyro_Y, gz = imu.ScaledData.Gyro_Z;
-			//float targetAngle = setpoint;
-			float p = pitch;
-			DataReady = 0;		
-			__enable_irq();			// Mở ngắt NGAY sau khi copy xong — DMA IRQ có thể phục vụ từ đây
-			
-			// Hiển thị lên màn hình OLED
-			char oled_buf[128];
-			
-			// Thực hiện update dữ liệu lên màn hình
-			if (OLED_Get_State_DMA() == OLED_DMA_STATE_IDLE)
-			{
-				OLED_Clear_Buffer();
-				sprintf(oled_buf, "Pitch [deg]: %.3f", p);
-				OLED_Print_String(oled_buf, 0, 25, OLED_COLOR_WHITE);
-				sprintf(oled_buf, "Kp : %.3f, Ki: %.3f, Kd: %.3f", kp, ki, kd);
-				OLED_Print_String(oled_buf, 0, 45, OLED_COLOR_WHITE);
-				OLED_Update_Display_DMA();
-			}
-			
-			// Thực hiện gửi dữ liệu lên máy tính để xem Plot
-			// HC05_Send_IMU_Frame(&hc05Dev, targetAngle, p, ax, ay, az, gx, gy, gz);
-		}
-	}
+
+    /* 9. Visual Notice: Calibration Phase Starting
+     *    Keep the robot stationary and upright during this 1-second phase!
+     */
+    for (uint8_t i = 0; i < 6; i++)
+    {
+        LED_BUILTIN_TOGGLE();
+        delay(50);
+    }
+    LED_BUILTIN_ON(); // LED active during calibration
+
+    /* Calibrate zero-rate gyro drift offsets */
+    MPU6050_CalibrateGyro(&g_mpu6050, 400);
+
+    /* Pre-seed Kalman filter with initial accelerometer tilt angle */
+    MPU6050_ReadScaledData(&g_mpu6050);
+    float init_pitch = atan2f(-g_mpu6050.ScaledData.Accel_X, g_mpu6050.ScaledData.Accel_Z) * RAD_TO_DEG;
+    Kalman_SetAngle(&g_kalman, init_pitch);
+    g_pitch_deg = init_pitch;
+
+    /* Check initial orientation before enabling control */
+    float init_error = fabsf(init_pitch - g_theta_offset_deg);
+    if (init_error < RECOVERY_ANGLE_LIMIT_DEG)
+    {
+        g_robot_enabled = true;
+        LED_BUILTIN_ON();  /* LED BuiltIn is ON when robot operates normally*/
+    }
+    else
+    {
+        g_robot_enabled = false;
+        LED_BUILTIN_OFF(); /* LED BuiltIn is OFF when the robot falls over. Keep it off until the robot is upright again.*/
+    }
+
+    /* 10. Start Hard Real-Time Control Loop Timer (TIM2 @ 200 Hz / 5 ms) */
+    ControlLoop_Timer_Init();
+
+    /* =====================================================================
+     * Background Superloop
+     * Handles non-time-critical asynchronous tasks:
+     *   - Bluetooth packet reception & LQR gain updates
+     *   - Telemetry frame transmission to PC
+     *   - Direction steering commands
+     * ===================================================================== */
+    uint8_t rx_buffer[HC05_RX_BUFFER_SIZE];
+
+    while (1)
+    {
+        /* -----------------------------------------------------------------
+         * 1. Process Incoming Bluetooth Packets from HC-05
+         * ----------------------------------------------------------------- */
+        if (HC05_Receive_Frame(&g_hc05, rx_buffer))
+        {
+            /* Check if new LQR Feedback Gains (K1..K4) were received */
+            if (HC05_Is_LQR_Parameter_New(&g_hc05))
+            {
+                float k1, k2, k3, k4;
+                HC05_Get_LQR_Parameters(&g_hc05, &k1, &k2, &k3, &k4);
+                LQR_Set_Gains(&g_lqr, k1, k2, k3, k4);
+            }
+
+            /* Check if new Static Equilibrium Balance Setpoint (theta_offset) was received */
+            if (HC05_Is_Setpoint_New(&g_hc05))
+            {
+                g_theta_offset_deg = HC05_Get_Setpoint(&g_hc05);
+            }
+
+            /* Check if new Motion Direction Command was received */
+            if (HC05_Is_Direction_New(&g_hc05))
+            {
+                HC05_DirectionCode_t dir = HC05_Get_Direction(&g_hc05);
+                switch (dir)
+                {
+                    case DIR_FORWARD:
+                        g_lqr.vel_ref = DRIVE_VELOCITY_TARGET;
+                        g_steering_voltage = 0.0f;
+                        break;
+
+                    case DIR_REVERSED:
+                        g_lqr.vel_ref = -DRIVE_VELOCITY_TARGET;
+                        g_steering_voltage = 0.0f;
+                        break;
+
+                    case DIR_LEFT:
+                        g_lqr.vel_ref = 0.0f;
+                        g_steering_voltage = -STEERING_VOLTAGE_STEP;
+                        break;
+
+                    case DIR_RIGHT:
+                        g_lqr.vel_ref = 0.0f;
+                        g_steering_voltage = STEERING_VOLTAGE_STEP;
+                        break;
+
+                    case DIR_NONE:
+                    default:
+                        g_lqr.vel_ref = 0.0f;
+                        g_steering_voltage = 0.0f;
+                        /* Lock current chassis position to eliminate residual drift */
+                        g_lqr.pos_ref = Motor_Get_Chassis_Position() * 0.001f;
+                        break;
+                }
+            }
+        }
+
+        /* -----------------------------------------------------------------
+         * 2. Transmit IMU Telemetry to PC (hc05_fast_plotter.py)
+         * ----------------------------------------------------------------- */
+        if (g_telemetry_flag)
+        {
+            g_telemetry_flag = 0;
+            HC05_Send_IMU_Frame(&g_hc05,
+                                g_theta_offset_deg,
+                                g_pitch_deg,
+                                g_mpu6050.ScaledData.Accel_X,
+                                g_mpu6050.ScaledData.Accel_Y,
+                                g_mpu6050.ScaledData.Accel_Z,
+                                g_mpu6050.ScaledData.Gyro_X,
+                                g_mpu6050.ScaledData.Gyro_Y,
+                                g_mpu6050.ScaledData.Gyro_Z);
+        }
+    }
 }
+
+/* =========================================================================
+ * Control Loop Timer Setup (TIM2)
+ * Configures TIM2 for periodic 200 Hz update interrupts (5 ms interval).
+ * ========================================================================= */
+static void ControlLoop_Timer_Init(void)
+{
+    /* Enable TIM2 clock on APB1 */
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+
+    /* Prescaler: 1 tick = 1 microsecond (1 MHz) */
+    TIM2->PSC = (SystemCoreClock / 1000000UL) - 1UL;
+
+    /* Auto-Reload: 5000 ticks = 5000 us = 5 ms (200 Hz) */
+    TIM2->ARR = (uint32_t)(CONTROL_LOOP_DT * 1000000.0f) - 1UL;
+
+    /* Clear update interrupt flag */
+    TIM2->SR &= ~TIM_SR_UIF;
+
+    /* Enable Update Interrupt (UIE) */
+    TIM2->DIER |= TIM_DIER_UIE;
+
+    /* Enable counter */
+    TIM2->CR1 |= TIM_CR1_CEN;
+}
+
+/* =========================================================================
+ * Voltage to PWM Converter with Stiction Deadband Compensation
+ * ========================================================================= */
+static int32_t Voltage_To_PWM(float voltage, float deadband)
+{
+    if (fabsf(voltage) < 0.05f)
+    {
+        return 0;
+    }
+
+    /* Linear voltage-to-duty scaling: (V / Vbat) * ARR */
+    float duty = (fabsf(voltage) / BATTERY_VOLTAGE) * (float)PWM_MAX_ARR;
+
+    /* Add deadband compensation to overcome mechanical stiction */
+    duty += deadband;
+
+    /* Saturation clamping */
+    if (duty > (float)PWM_MAX_ARR)
+    {
+        duty = (float)PWM_MAX_ARR;
+    }
+
+    int32_t pwm = (int32_t)duty;
+    return (voltage > 0.0f) ? pwm : -pwm;
+}
+
+/* =========================================================================
+ * HARD REAL-TIME INTERRUPT SERVICE ROUTINES
+ * ========================================================================= */
+
+/**
+ * @brief  TIM2 Interrupt Handler - Executes LQR Balancing Control Loop at 200 Hz.
+ *         Configured with highest NVIC priority (Level 0).
+ */
+void TIM2_IRQHandler(void)
+{
+    static uint8_t telemetry_div = 0;
+
+    if (TIM2->SR & TIM_SR_UIF)
+    {
+        TIM2->SR &= ~TIM_SR_UIF;
+
+        /* 1. Read MPU-6050 Scaled Sensor Data */
+        if (MPU6050_ReadScaledData(&g_mpu6050) == MPU6050_OK)
+        {
+            float ax = g_mpu6050.ScaledData.Accel_X;
+            float ay = g_mpu6050.ScaledData.Accel_Y;
+            float az = g_mpu6050.ScaledData.Accel_Z;
+            float gy = g_mpu6050.ScaledData.Gyro_Y;
+
+            /* Compute raw pitch from accelerometer: atan2(-ax, az) */
+            float accel_pitch = atan2f(-ax, az) * RAD_TO_DEG;
+
+            /* Fuse accelerometer and gyroscope with Kalman filter */
+            g_pitch_deg  = Kalman_GetAngle(&g_kalman, accel_pitch, gy, CONTROL_LOOP_DT);
+            g_gyro_y_dps = gy;
+        }
+
+        /* 2. Update Wheel Encoders and Read Chassis Linear States */
+        Motor_Encoder_Update();
+        float pos_m   = Motor_Get_Chassis_Position() * 0.001f;                              // mm -> m
+        float vel_m_s = Motor_Get_Chassis_Linear_Velocity(CONTROL_LOOP_DT) * 0.001f;        // mm/s -> m/s
+
+        /* 3. Safety Failsafe Guard (Tilt / Fallen Angle Protection) */
+        float pitch_error_deg = g_pitch_deg - g_theta_offset_deg;
+
+        if (fabsf(pitch_error_deg) > FALLEN_ANGLE_LIMIT_DEG)
+        {
+            /* Robot fell over or was picked up: stop motors and turn off LED immediately */
+            if (g_robot_enabled)
+            {
+                g_robot_enabled = false;
+                TB6612_Coast();
+                Motor_Encoder_Reset();
+                g_lqr.pos_ref = 0.0f;
+                LED_BUILTIN_OFF();  /* LED BuiltIn is OFF when the robot falls over. Keep it off until the robot is upright again.*/
+            }
+        }
+        else if (!g_robot_enabled && fabsf(pitch_error_deg) < RECOVERY_ANGLE_LIMIT_DEG)
+        {
+            /* Robot placed back to upright position: re-engage balancing and turn on LED */
+            g_robot_enabled = true;
+            Motor_Encoder_Reset();
+            g_lqr.pos_ref = 0.0f;
+            LED_BUILTIN_ON();       /* LED BuiltIn is ON when robot operates normally*/
+        }
+
+        /* 4. Compute and Apply LQR Actuation */
+        if (g_robot_enabled)
+        {
+            /* Convert angle and angular velocity to standard SI units */
+            float theta_rad = pitch_error_deg * DEG_TO_RAD;
+            float omega_rad = g_gyro_y_dps * DEG_TO_RAD;
+
+            /* Compute baseline balance voltage Va (Volts) */
+            float v_bal = LQR_Compute(&g_lqr, pos_m, vel_m_s, theta_rad, omega_rad);
+
+            /* Differential steering mixer */
+            float v_left  = v_bal + g_steering_voltage;
+            float v_right = v_bal - g_steering_voltage;
+
+            /* Convert output voltage to PWM compare values */
+            int32_t pwm_left  = Voltage_To_PWM(v_left,  g_lqr.deadband_pwm);
+            int32_t pwm_right = Voltage_To_PWM(v_right, g_lqr.deadband_pwm);
+
+            /* Drive motors via TB6612 H-bridge */
+            TB6612_Control_Motors(pwm_left, pwm_right);
+        }
+        else
+        {
+            TB6612_Coast();
+        }
+
+        /* 5. Decimate Telemetry Flag for Background Loop */
+        telemetry_div++;
+        if (telemetry_div >= TELEMETRY_DECIMATION)
+        {
+            telemetry_div = 0;
+            g_telemetry_flag = 1;
+        }
+    }
+}
+
+/**
+ * @brief  USART2 Interrupt Handler for HC-05 Bluetooth reception (IDLE line detection).
+ */
+void USART2_IRQHandler(void)
+{
+    HC05_IRQ_Handler(&g_hc05);
+}
+
+/**
+ * @brief  DMA1 Stream 6 Interrupt Handler for HC-05 Bluetooth TX DMA.
+ */
+void DMA1_Stream6_IRQHandler(void)
+{
+    HC05_TX_DMA_IRQHandler(&g_hc05);
+}
+
+/**
+ * @brief  DMA1 Stream 5 Interrupt Handler for HC-05 Bluetooth RX DMA.
+ *         (Disabled: RX reception is handled entirely by USART2 IDLE interrupt)
+ */
+/*
+void DMA1_Stream5_IRQHandler(void)
+{
+    HC05_RX_DMA_IRQHandler(&g_hc05);
+}
+*/

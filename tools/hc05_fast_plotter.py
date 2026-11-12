@@ -212,8 +212,8 @@ def ble_thread_func():
 class RealTimePlotter(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MPU6050 Real-time Telemetry & PID Tuning (PyQtGraph)")
-        self.resize(1150, 780)
+        self.setWindowTitle("MPU6050 Real-time Telemetry & LQR Controller Tuning (PyQtGraph)")
+        self.resize(1180, 780)
         
         # 1. Main Layout
         central_widget = QtWidgets.QWidget()
@@ -221,118 +221,101 @@ class RealTimePlotter(QtWidgets.QMainWindow):
         main_layout = QtWidgets.QVBoxLayout()
         central_widget.setLayout(main_layout)
         
-        # 2. Control Panel (Bảng điều khiển 3 vòng PID độc lập)
-        control_group = QtWidgets.QGroupBox("Bảng điều khiển thông số 3 vòng PID & Quan sát đáp ứng")
+        # 2. Control Panel (Bảng điều khiển LQR & Cân bằng tĩnh)
+        control_group = QtWidgets.QGroupBox("Bảng điều khiển thông số LQR (Linear Quadratic Regulator) & Điểm cân bằng tĩnh")
         control_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         grid_layout = QtWidgets.QGridLayout()
-        grid_layout.setHorizontalSpacing(10)
+        grid_layout.setHorizontalSpacing(8)
         grid_layout.setVerticalSpacing(8)
         control_group.setLayout(grid_layout)
 
         input_style = "font-size: 13px; font-weight: bold; padding: 4px; border: 1px solid #555; border-radius: 3px;"
-        label_param_style = "font-size: 13px; font-weight: bold;"
+        trim_btn_style = "background-color: #37474F; color: white; font-weight: bold; font-size: 12px; padding: 4px 8px; border-radius: 3px;"
 
-        # --- HÀNG 1: [1] PID CÂN BẰNG (BALANCE) ---
-        lbl_bal = QtWidgets.QLabel("[1] PID CÂN BẰNG  :")
-        lbl_bal.setStyleSheet("font-size: 13px; font-weight: bold; color: #FFD700;")
-        grid_layout.addWidget(lbl_bal, 0, 0)
+        # --- HÀNG 1: [1] VECTOR HỆ SỐ LQR (K1, K2, K3, K4) ---
+        lbl_lqr = QtWidgets.QLabel("[1] VECTOR HỆ SỐ LQR (K) :")
+        lbl_lqr.setStyleSheet("font-size: 13px; font-weight: bold; color: #FFD700;")
+        grid_layout.addWidget(lbl_lqr, 0, 0)
 
-        grid_layout.addWidget(QtWidgets.QLabel("Kp:"), 0, 1)
-        self.input_bal_kp = QtWidgets.QLineEdit("0.000")
-        self.input_bal_kp.setFixedWidth(75)
-        self.input_bal_kp.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_bal_kp, 0, 2)
+        grid_layout.addWidget(QtWidgets.QLabel("K1 (Pos):"), 0, 1)
+        self.input_lqr_k1 = QtWidgets.QLineEdit("-7.071")
+        self.input_lqr_k1.setFixedWidth(80)
+        self.input_lqr_k1.setStyleSheet(input_style)
+        grid_layout.addWidget(self.input_lqr_k1, 0, 2)
 
-        grid_layout.addWidget(QtWidgets.QLabel("Ki:"), 0, 3)
-        self.input_bal_ki = QtWidgets.QLineEdit("0.000")
-        self.input_bal_ki.setFixedWidth(75)
-        self.input_bal_ki.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_bal_ki, 0, 4)
+        grid_layout.addWidget(QtWidgets.QLabel("K2 (Vel):"), 0, 3)
+        self.input_lqr_k2 = QtWidgets.QLineEdit("-27.967")
+        self.input_lqr_k2.setFixedWidth(80)
+        self.input_lqr_k2.setStyleSheet(input_style)
+        grid_layout.addWidget(self.input_lqr_k2, 0, 4)
 
-        grid_layout.addWidget(QtWidgets.QLabel("Kd:"), 0, 5)
-        self.input_bal_kd = QtWidgets.QLineEdit("0.000")
-        self.input_bal_kd.setFixedWidth(75)
-        self.input_bal_kd.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_bal_kd, 0, 6)
+        grid_layout.addWidget(QtWidgets.QLabel("K3 (Angle):"), 0, 5)
+        self.input_lqr_k3 = QtWidgets.QLineEdit("-40.384")
+        self.input_lqr_k3.setFixedWidth(80)
+        self.input_lqr_k3.setStyleSheet(input_style)
+        grid_layout.addWidget(self.input_lqr_k3, 0, 6)
 
-        self.btn_send_bal = QtWidgets.QPushButton("GỬI BALANCE")
-        self.btn_send_bal.setStyleSheet("background-color: #2E7D32; color: white; font-weight: bold; padding: 5px 14px; border-radius: 3px;")
-        self.btn_send_bal.clicked.connect(lambda: self.send_pid_loop("PID CÂN BẰNG", "BAL", self.input_bal_kp, self.input_bal_ki, self.input_bal_kd))
-        grid_layout.addWidget(self.btn_send_bal, 0, 7)
+        grid_layout.addWidget(QtWidgets.QLabel("K4 (Rate):"), 0, 7)
+        self.input_lqr_k4 = QtWidgets.QLineEdit("-3.563")
+        self.input_lqr_k4.setFixedWidth(80)
+        self.input_lqr_k4.setStyleSheet(input_style)
+        grid_layout.addWidget(self.input_lqr_k4, 0, 8)
 
-        # --- HÀNG 2: [2] PID VẬN TỐC (VELOCITY) ---
-        lbl_vel = QtWidgets.QLabel("[2] PID VẬN TỐC   :")
-        lbl_vel.setStyleSheet("font-size: 13px; font-weight: bold; color: #64B5F6;")
-        grid_layout.addWidget(lbl_vel, 1, 0)
+        self.btn_send_lqr = QtWidgets.QPushButton("GỬI LQR")
+        self.btn_send_lqr.setStyleSheet("background-color: #2E7D32; color: white; font-weight: bold; padding: 5px 14px; border-radius: 3px;")
+        self.btn_send_lqr.clicked.connect(self.send_lqr_parameters)
+        grid_layout.addWidget(self.btn_send_lqr, 0, 9)
 
-        grid_layout.addWidget(QtWidgets.QLabel("Kp:"), 1, 1)
-        self.input_vel_kp = QtWidgets.QLineEdit("0.000")
-        self.input_vel_kp.setFixedWidth(75)
-        self.input_vel_kp.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_vel_kp, 1, 2)
+        # --- HÀNG 2: [2] CÂN BẰNG TĨNH (θ_offset) & VI CHỈNH NHANH ---
+        lbl_sp = QtWidgets.QLabel("[2] CÂN BẰNG TĨNH (θ_offset) :")
+        lbl_sp.setStyleSheet("font-size: 13px; font-weight: bold; color: #A5D6A7;")
+        grid_layout.addWidget(lbl_sp, 1, 0)
 
-        grid_layout.addWidget(QtWidgets.QLabel("Ki:"), 1, 3)
-        self.input_vel_ki = QtWidgets.QLineEdit("0.000")
-        self.input_vel_ki.setFixedWidth(75)
-        self.input_vel_ki.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_vel_ki, 1, 4)
+        grid_layout.addWidget(QtWidgets.QLabel("Góc (°):"), 1, 1)
+        self.input_setpoint = QtWidgets.QLineEdit("1.056")
+        self.input_setpoint.setFixedWidth(80)
+        self.input_setpoint.setStyleSheet(input_style)
+        grid_layout.addWidget(self.input_setpoint, 1, 2)
 
-        grid_layout.addWidget(QtWidgets.QLabel("Kd:"), 1, 5)
-        self.input_vel_kd = QtWidgets.QLineEdit("0.000")
-        self.input_vel_kd.setFixedWidth(75)
-        self.input_vel_kd.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_vel_kd, 1, 6)
+        # Các nút vi chỉnh nhanh (Trim) điểm cân bằng tĩnh
+        self.btn_trim_minus_fine = QtWidgets.QPushButton("-0.02°")
+        self.btn_trim_minus_fine.setStyleSheet(trim_btn_style)
+        self.btn_trim_minus_fine.clicked.connect(lambda: self.trim_setpoint(-0.02))
+        grid_layout.addWidget(self.btn_trim_minus_fine, 1, 3)
 
-        self.btn_send_vel = QtWidgets.QPushButton("GỬI VẬN TỐC")
-        self.btn_send_vel.setStyleSheet("background-color: #1565C0; color: white; font-weight: bold; padding: 5px 14px; border-radius: 3px;")
-        self.btn_send_vel.clicked.connect(lambda: self.send_pid_loop("PID VẬN TỐC", "VEL", self.input_vel_kp, self.input_vel_ki, self.input_vel_kd))
-        grid_layout.addWidget(self.btn_send_vel, 1, 7)
+        self.btn_trim_plus_fine = QtWidgets.QPushButton("+0.02°")
+        self.btn_trim_plus_fine.setStyleSheet(trim_btn_style)
+        self.btn_trim_plus_fine.clicked.connect(lambda: self.trim_setpoint(+0.02))
+        grid_layout.addWidget(self.btn_trim_plus_fine, 1, 4)
 
-        # --- HÀNG 3: [3] PID HƯỚNG RẼ (STEERING) ---
-        lbl_str = QtWidgets.QLabel("[3] PID HƯỚNG RẼ  :")
-        lbl_str.setStyleSheet("font-size: 13px; font-weight: bold; color: #FFB74D;")
-        grid_layout.addWidget(lbl_str, 2, 0)
+        self.btn_trim_minus = QtWidgets.QPushButton("-0.10°")
+        self.btn_trim_minus.setStyleSheet(trim_btn_style)
+        self.btn_trim_minus.clicked.connect(lambda: self.trim_setpoint(-0.10))
+        grid_layout.addWidget(self.btn_trim_minus, 1, 5)
 
-        grid_layout.addWidget(QtWidgets.QLabel("Kp:"), 2, 1)
-        self.input_str_kp = QtWidgets.QLineEdit("0.000")
-        self.input_str_kp.setFixedWidth(75)
-        self.input_str_kp.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_str_kp, 2, 2)
+        self.btn_trim_plus = QtWidgets.QPushButton("+0.10°")
+        self.btn_trim_plus.setStyleSheet(trim_btn_style)
+        self.btn_trim_plus.clicked.connect(lambda: self.trim_setpoint(+0.10))
+        grid_layout.addWidget(self.btn_trim_plus, 1, 6)
 
-        grid_layout.addWidget(QtWidgets.QLabel("Ki:"), 2, 3)
-        self.input_str_ki = QtWidgets.QLineEdit("0.000")
-        self.input_str_ki.setFixedWidth(75)
-        self.input_str_ki.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_str_ki, 2, 4)
-
-        grid_layout.addWidget(QtWidgets.QLabel("Kd:"), 2, 5)
-        self.input_str_kd = QtWidgets.QLineEdit("0.000")
-        self.input_str_kd.setFixedWidth(75)
-        self.input_str_kd.setStyleSheet(input_style)
-        grid_layout.addWidget(self.input_str_kd, 2, 6)
-
-        self.btn_send_str = QtWidgets.QPushButton("GỬI HƯỚNG RẼ")
-        self.btn_send_str.setStyleSheet("background-color: #E65100; color: white; font-weight: bold; padding: 5px 14px; border-radius: 3px;")
-        self.btn_send_str.clicked.connect(lambda: self.send_pid_loop("PID HƯỚNG RẼ", "STR", self.input_str_kp, self.input_str_ki, self.input_str_kd))
-        grid_layout.addWidget(self.btn_send_str, 2, 7)
+        self.btn_send_sp = QtWidgets.QPushButton("GỬI SETPOINT")
+        self.btn_send_sp.setStyleSheet("background-color: #1565C0; color: white; font-weight: bold; padding: 5px 14px; border-radius: 3px;")
+        self.btn_send_sp.clicked.connect(self.send_setpoint)
+        grid_layout.addWidget(self.btn_send_sp, 1, 9)
 
         # Hỗ trợ bấm phím Enter trong ô nhập để gửi ngay
-        self.input_bal_kp.returnPressed.connect(self.btn_send_bal.click)
-        self.input_bal_ki.returnPressed.connect(self.btn_send_bal.click)
-        self.input_bal_kd.returnPressed.connect(self.btn_send_bal.click)
-        self.input_vel_kp.returnPressed.connect(self.btn_send_vel.click)
-        self.input_vel_ki.returnPressed.connect(self.btn_send_vel.click)
-        self.input_vel_kd.returnPressed.connect(self.btn_send_vel.click)
-        self.input_str_kp.returnPressed.connect(self.btn_send_str.click)
-        self.input_str_ki.returnPressed.connect(self.btn_send_str.click)
-        self.input_str_kd.returnPressed.connect(self.btn_send_str.click)
+        self.input_lqr_k1.returnPressed.connect(self.btn_send_lqr.click)
+        self.input_lqr_k2.returnPressed.connect(self.btn_send_lqr.click)
+        self.input_lqr_k3.returnPressed.connect(self.btn_send_lqr.click)
+        self.input_lqr_k4.returnPressed.connect(self.btn_send_lqr.click)
+        self.input_setpoint.returnPressed.connect(self.btn_send_sp.click)
 
         # Cột trạng thái hiển thị trực tiếp góc Pitch & Target thời gian thực ở bên phải
-        self.lbl_pitch_live = QtWidgets.QLabel("Target: 0.00°\nPitch:  0.00°\nErr:    0.00°")
+        self.lbl_pitch_live = QtWidgets.QLabel("Setpoint: 0.000°\nPitch:    0.00°\nErr:      0.00°")
         align_center = QtCore.Qt.AlignCenter if hasattr(QtCore.Qt, 'AlignCenter') else QtCore.Qt.AlignmentFlag.AlignCenter
         self.lbl_pitch_live.setAlignment(align_center)
-        self.lbl_pitch_live.setStyleSheet("font-family: Consolas, monospace; font-size: 13px; font-weight: bold; color: #FFD700; background-color: #212121; padding: 6px 12px; border: 1px solid #444; border-radius: 5px; min-width: 125px;")
-        grid_layout.addWidget(self.lbl_pitch_live, 0, 8, 3, 1)
+        self.lbl_pitch_live.setStyleSheet("font-family: Consolas, monospace; font-size: 13px; font-weight: bold; color: #A5D6A7; background-color: #212121; padding: 6px 12px; border: 1px solid #444; border-radius: 5px; min-width: 145px;")
+        grid_layout.addWidget(self.lbl_pitch_live, 0, 10, 2, 1)
 
         main_layout.addWidget(control_group)
         
@@ -383,30 +366,72 @@ class RealTimePlotter(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update_plots)
         self.timer.start(20)
         
-    def send_pid_loop(self, loop_name, prefix, input_kp, input_ki, input_kd):
-        """Hàm gửi thông số Kp, Ki, Kd cho từng vòng PID riêng biệt"""
+    def send_lqr_parameters(self):
+        """Hàm gửi 4 thông số K1, K2, K3, K4 của bộ điều khiển LQR xuống STM32"""
         try:
-            kp = float(input_kp.text())
-            ki = float(input_ki.text())
-            kd = float(input_kd.text())
+            k1 = float(self.input_lqr_k1.text())
+            k2 = float(self.input_lqr_k2.text())
+            k3 = float(self.input_lqr_k3.text())
+            k4 = float(self.input_lqr_k4.text())
 
-            # Tách thành 3 Frame nhỏ gọn để không vượt quá 20 bytes của BLE
-            frame_kp = f"{prefix}:Kp={kp:.3f}\r\n"
-            frame_ki = f"{prefix}:Ki={ki:.3f}\r\n"
-            frame_kd = f"{prefix}:Kd={kd:.3f}\r\n"
+            # Tách thành 4 Frame BLE nhỏ gọn (< 20 bytes/gói)
+            frame_k1 = f"LQR:K1={k1:.3f}\r\n"
+            frame_k2 = f"LQR:K2={k2:.3f}\r\n"
+            frame_k3 = f"LQR:K3={k3:.3f}\r\n"
+            frame_k4 = f"LQR:K4={k4:.3f}\r\n"
 
-            # Đẩy lần lượt 3 frame vào hàng đợi (mỗi frame sẽ được gửi cách nhau 50ms nhờ tx_worker)
-            tx_queue.put(frame_kp)
-            tx_queue.put(frame_ki)
-            tx_queue.put(frame_kd)
+            # Đẩy lần lượt 4 frame vào hàng đợi (truyền cách nhau 50ms qua tx_worker)
+            tx_queue.put(frame_k1)
+            tx_queue.put(frame_k2)
+            tx_queue.put(frame_k3)
+            tx_queue.put(frame_k4)
 
-            print(f"\n[GUI] Đã đưa 3 lệnh vào hàng đợi cho {loop_name} ({prefix}):")
-            print(f"      -> {repr(frame_kp)}")
-            print(f"      -> {repr(frame_ki)}")
-            print(f"      -> {repr(frame_kd)}")
+            print(f"\n[GUI] Đã đưa 4 lệnh LQR vào hàng đợi gửi xuống STM32:")
+            print(f"      -> {repr(frame_k1)}")
+            print(f"      -> {repr(frame_k2)}")
+            print(f"      -> {repr(frame_k3)}")
+            print(f"      -> {repr(frame_k4)}")
 
         except ValueError:
-            QtWidgets.QMessageBox.warning(self, "Lỗi định dạng", f"Vui lòng nhập Kp, Ki, Kd dưới dạng số thực hợp lệ cho {loop_name} (ví dụ: 12.345)!")
+            QtWidgets.QMessageBox.warning(
+                self, "Lỗi định dạng",
+                "Vui lòng nhập K1, K2, K3, K4 dưới dạng số thực hợp lệ (ví dụ: -7.071)!"
+            )
+
+    def trim_setpoint(self, delta):
+        """Vi chỉnh góc cân bằng tĩnh theta_offset theo bước delta và gửi ngay"""
+        try:
+            current_val = float(self.input_setpoint.text())
+            new_val = current_val + delta
+            if -10.0 <= new_val <= 10.0:
+                self.input_setpoint.setText(f"{new_val:.3f}")
+                self.send_setpoint()
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self, "Vượt ngưỡng",
+                    "Setpoint góc cân bằng tĩnh phải nằm trong khoảng [-10.0°, +10.0°]!"
+                )
+        except ValueError:
+            pass
+
+    def send_setpoint(self):
+        """Gửi giá trị Setpoint (góc cân bằng tĩnh theta_offset) mới xuống STM32"""
+        try:
+            sp = float(self.input_setpoint.text())
+
+            # Giới hạn hợp lệ: [-10.0°, +10.0°] để bảo vệ firmware
+            if not (-10.0 <= sp <= 10.0):
+                raise ValueError("Out of range")
+
+            frame = f"SET:{sp:.3f}\r\n"
+            tx_queue.put(frame)
+            print(f"\n[GUI] Đã gửi Setpoint (cân bằng tĩnh) mới: {repr(frame)}")
+
+        except ValueError:
+            QtWidgets.QMessageBox.warning(
+                self, "Lỗi Setpoint",
+                "Setpoint phải là số thực trong khoảng [-10.0, +10.0]° (ví dụ: 1.056)"
+            )
 
     def update_plots(self):
         """Cập nhật dữ liệu đồ thị"""
@@ -450,7 +475,7 @@ class RealTimePlotter(QtWidgets.QMainWindow):
 
             # Cập nhật giá trị hiển thị trực tiếp lên nhãn (Target, Pitch, Error)
             err = latest_pitch - latest_target
-            self.lbl_pitch_live.setText(f"Target: {latest_target:>5.2f}°\nPitch:  {latest_pitch:>5.2f}°\nErr:    {err:>5.2f}°")
+            self.lbl_pitch_live.setText(f"Setpoint: {latest_target:>6.3f}°\nPitch:    {latest_pitch:>5.2f}°\nErr:      {err:>5.2f}°")
 
 def main():
     print("======================================================")

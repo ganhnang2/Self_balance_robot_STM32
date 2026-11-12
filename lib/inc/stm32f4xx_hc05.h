@@ -19,6 +19,7 @@
  *				   - Kp value: "PID:Kp=5.670"
  *                 - Ki value: "PID:Ki=5.670"
  *				   - Kd value: "PID:Kd=5.670"
+ *                 - Setpoint: "SET:1.056" (balance setpoint angle in degrees)
  *              2. STM32 -> PC (Data transmitted):
  *                 - IMU data: `IMU:Pitch,Roll,Ax,Ay,Az,Gx,Gy,Gz`
  *                   (e.g., "IMU:67.800,20.560,0.680,0.340,0.000,6.780,-9.560,-4.340\r\n")
@@ -81,10 +82,24 @@ typedef struct {
     uint8_t           isNew;
 } HC05_PID_t;
 
+/* ==================== LQR Structure Definitions ==================== */
+typedef struct {
+    float   K1;     /*!< Position gain (p) */
+    float   K2;     /*!< Velocity gain (p_dot) */
+    float   K3;     /*!< Angle gain (theta) */
+    float   K4;     /*!< Angular velocity gain (theta_dot) */
+    uint8_t isNew;  /*!< Flag: 1 = new LQR parameters received, not yet consumed */
+} HC05_LQR_t;
+
 typedef struct {
     HC05_DirectionCode_t current;
     uint8_t              isNew;
 } HC05_Direction_t;
+
+typedef struct {
+    float   value;  /*!< Setpoint angle received from PC (degrees) */
+    uint8_t isNew;  /*!< Flag: 1 = new setpoint received, not yet consumed */
+} HC05_Setpoint_t;
 
 typedef struct {
     USART_Handle_t   usart;
@@ -92,7 +107,9 @@ typedef struct {
     char             txBuffer[HC05_TX_BUFFER_SIZE];
     char             rxBuffer[HC05_RX_BUFFER_SIZE];
     HC05_PID_t       pid;
+    HC05_LQR_t       lqr;
     HC05_Direction_t direction;
+    HC05_Setpoint_t  setpoint;
 } HC05_Device_t;
 
 /**
@@ -191,6 +208,27 @@ HC05_DirectionCode_t HC05_Get_Direction(HC05_Device_t* dev);
 uint8_t HC05_Is_Parameter_New(HC05_Device_t* dev);
 
 /**
+ * @brief   Get the latest received LQR tuning parameters.
+ * @details Copies the stored K1, K2, K3, K4 values into the provided pointers
+ *          and clears the new parameter flag.
+ * @param   dev Pointer to HC05_Device_t instance.
+ * @param   K1  Pointer to store K1 value (can be NULL).
+ * @param   K2  Pointer to store K2 value (can be NULL).
+ * @param   K3  Pointer to store K3 value (can be NULL).
+ * @param   K4  Pointer to store K4 value (can be NULL).
+ * @retval  None
+ */
+void HC05_Get_LQR_Parameters(HC05_Device_t* dev, float* K1, float* K2, float* K3, float* K4);
+
+/**
+ * @brief   Check if new LQR tuning parameters have been received.
+ * @details Returns 1 if an LQR parameter frame was parsed in the last received frame.
+ * @param   dev Pointer to HC05_Device_t instance.
+ * @retval  uint8_t 1 (true) if new LQR parameters are available, 0 (false) otherwise.
+ */
+uint8_t HC05_Is_LQR_Parameter_New(HC05_Device_t* dev);
+
+/**
  * @brief   Check if a new direction command has been received.
  * @details Returns 1 if a direction command frame was parsed in the last received frame.
  * @param   dev Pointer to HC05_Device_t instance.
@@ -199,7 +237,23 @@ uint8_t HC05_Is_Parameter_New(HC05_Device_t* dev);
 uint8_t HC05_Is_Direction_New(HC05_Device_t* dev);
 
 /**
- * @brief   Interrupt service routine handler for HC-05 USART.
+ * @brief   Check if a new setpoint has been received.
+ * @details Returns 1 if a "SET:" frame was parsed in the last received frame.
+ * @param   dev Pointer to HC05_Device_t instance.
+ * @retval  uint8_t 1 (true) if a new setpoint is available, 0 (false) otherwise.
+ */
+uint8_t HC05_Is_Setpoint_New(HC05_Device_t* dev);
+
+/**
+ * @brief   Get the latest received setpoint value.
+ * @details Returns the stored setpoint angle and clears the new setpoint flag.
+ * @param   dev Pointer to HC05_Device_t instance.
+ * @retval  float The setpoint angle in degrees.
+ */
+float HC05_Get_Setpoint(HC05_Device_t* dev);
+
+/**
+ * @brief   Interrupt service routine handler for HC-05 USART (IDLE line detection).
  * @details Handles receiving data and pushes complete frames into the queue on IDLE line detection.
  *          Call this function inside the USARTx_IRQHandler of the USART connected to HC-05.
  * @param   dev Pointer to HC05_Device_t instance.
@@ -207,6 +261,18 @@ uint8_t HC05_Is_Direction_New(HC05_Device_t* dev);
  */
 void HC05_IRQ_Handler(HC05_Device_t* dev);
 
-void HC05_DMA_IRQHandler(HC05_Device_t* dev);
+/**
+ * @brief   DMA Interrupt service routine for HC-05 TX (DMA1 Stream 6).
+ * @details Call this function inside DMA1_Stream6_IRQHandler().
+ * @param   dev Pointer to HC05_Device_t instance.
+ */
+void HC05_TX_DMA_IRQHandler(HC05_Device_t* dev);
+
+/**
+ * @brief   DMA Interrupt service routine for HC-05 RX (DMA1 Stream 5).
+ * @details Call this function inside DMA1_Stream5_IRQHandler().
+ * @param   dev Pointer to HC05_Device_t instance.
+ */
+void HC05_RX_DMA_IRQHandler(HC05_Device_t* dev);
 
 #endif /* STM32F4XX_HC05_H_ */

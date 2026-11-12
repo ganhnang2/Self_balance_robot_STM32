@@ -180,7 +180,7 @@ MPU6050_Status_t MPU6050_ReadScaledData(MPU6050_t *dev)
     /* Temperature: TEMP_degC = RAW/340.0 + 36.53 */
     dev->ScaledData.Temp = ((float)dev->RawData.Temp / 340.0f) + 36.53f;
 
-    /* Gyro: divide by 131 LSB/(°/s), then subtract offset (°/s)  (±250°/s range) */
+    /* Gyro: divide by 131 LSB/(°/s), then subtract offset (°/s)  (±500°/s range) */
     dev->ScaledData.Gyro_X = (float)(dev->RawData.Gyro_X - dev->GyroOffset_X) / MPU6050_GYRO_SENS;
     dev->ScaledData.Gyro_Y = (float)(dev->RawData.Gyro_Y - dev->GyroOffset_Y) / MPU6050_GYRO_SENS;
     dev->ScaledData.Gyro_Z = (float)(dev->RawData.Gyro_Z - dev->GyroOffset_Z) / MPU6050_GYRO_SENS;

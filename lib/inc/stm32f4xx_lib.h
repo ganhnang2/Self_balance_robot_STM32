@@ -10,5 +10,6 @@
 #include "stm32f4xx_kalman.h"
 #include "stm32f4xx_font5x7.h"
 #include "stm32f4xx_cp_filter.h"
+#include "stm32f4xx_lqr.h"
 
 #endif

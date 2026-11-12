@@ -40,8 +40,8 @@ void Kalman_Init(Kalman_t *k) {
     /* Default tuning values for MPU6050 on self-balancing robots */
 	// Q_angle = 0.001f, Q_bias = 0.003f, R_measure = 0.03f (From the manufacturer)
     k->Q_angle   = 0.0005f;
-    k->Q_bias    = 0.003f;
-    k->R_measure = 0.8f;
+    k->Q_bias    = 0.008f;
+    k->R_measure = 1.5f;
 
 	/* Two states: angle, bias */
 	// x =  [k->angle, k->bias]

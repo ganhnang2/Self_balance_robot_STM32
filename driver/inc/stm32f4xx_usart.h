@@ -222,7 +222,7 @@ void USART_Read_Until_Idle_IT(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uin
 /**
  * @brief  						- Write data by using DMA (Direct Memory Access).
  *
- * @note   						- Only USART1 is supported for DMA in this driver.
+ * @note   						- Supports USART1 and USART2 for DMA in this driver.
  *
  * @param  pUSARTHandle 		- Pointer to a USART_Handle_t structure that contains the configuration information for the specified USART.
  * @param  buffer 				- Pointer to the data buffer to be transmitted.
@@ -235,7 +235,7 @@ void USART_Write_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nBy
 /**
  * @brief  						- Read data by using DMA (Direct Memory Access).
  *
- * @note   						- Only USART1 is supported for DMA in this driver.
+ * @note   						- Supports USART1 and USART2 for DMA in this driver.
  * @note						- Only receive the number of fixed bytes (nBytes) and the transaction has finished completely when 
  *								nBytes bytes are loaded into buffer
  *
@@ -250,7 +250,7 @@ void USART_Read_DMA(USART_Handle_t *pUSARTHandle, uint8_t *buffer, uint32_t nByt
 /**
  * @brief  						- Read data by using DMA (Direct Memory Access).
  *
- * @note   						- Only USART1 is supported for DMA in this driver.
+ * @note   						- Supports USART1 and USART2 for DMA in this driver.
  * @note						- This funtion allow user to receive data which has any number of bytes. It's the advanced function when comparing
  *								to USART_Read_DMA() function.
  *
@@ -325,7 +325,7 @@ void USART_IRQHandling(USART_Handle_t *pUSARTHandle);
 void USART1_DMA_IRQHandling(USART_Handle_t *pUSARTHandle);
 
 /**
- * @brief  						- Interrupt handling for USART2 DMA.
+ * @brief  						- Interrupt handling for USART2 DMA (Both TX and RX).
  *
  * @note   						- None.
  *
@@ -334,5 +334,14 @@ void USART1_DMA_IRQHandling(USART_Handle_t *pUSARTHandle);
  * @return 						- None
  */
 void USART2_DMA_IRQHandling(USART_Handle_t *pUSARTHandle);
+
+/**
+ * @brief  						- Interrupt handling for USART2 TX DMA (DMA1 Stream 6).
+ *
+ * @param  pUSARTHandle 		- Pointer to a USART_Handle_t structure.
+ */
+void USART2_TX_DMA_IRQHandling(USART_Handle_t *pUSARTHandle);
+
+void USART2_RX_DMA_IRQHandling(USART_Handle_t *pUSARTHandle);
 
 #endif
